@@ -1,0 +1,90 @@
+name = "referralkit"
+main = "src/index.ts"
+compatibility_date = "2026-07-03"
+workers_dev = true
+
+# Replace every example value before deploying. Keep production enrollment
+# disabled until the staging end-to-end matrix in README.md passes.
+[vars]
+ENVIRONMENT = "production"
+PUBLIC_SITE_URL = "https://example.com"
+APP_STORE_URL = "https://apps.apple.com/app/id1234567890"
+APP_STORE_ID = "1234567890"
+APP_NAME = "Example App"
+PRO_NAME = "Example Pro"
+CODE_PREFIX = "EXMP"
+AUTH_HEADER_PREFIX = "Example"
+REGISTRATION_ATTRIBUTE_KEY = "example_referral_registration_challenge"
+REVENUECAT_API_BASE = "https://api.revenuecat.com/v1"
+REVENUECAT_TRANSACTION_ENVIRONMENT = "PRODUCTION"
+REVENUECAT_ENTITLEMENT = "Example Pro"
+MONTHLY_PRODUCT_ID = "com.example.pro.monthly"
+YEARLY_PRODUCT_ID = "com.example.pro.yearly"
+LIFETIME_PRODUCT_IDS = "com.example.pro.lifetime"
+RECIPIENT_MONTHLY_OFFER_ID = "REPLACE_WITH_OFFER_REFERENCE"
+RECIPIENT_YEARLY_OFFER_ID = "REPLACE_WITH_OFFER_REFERENCE"
+SENDER_MONTHLY_PROMOTIONAL_OFFER_ID = "referral_sender_month_v1"
+SENDER_YEARLY_PROMOTIONAL_OFFER_ID = "referral_sender_yearly_month_v1"
+SENDER_MONTHLY_PROMOTIONAL_OFFER_2_MONTHS_ID = "referral_sender_month_2_v1"
+SENDER_YEARLY_PROMOTIONAL_OFFER_2_MONTHS_ID = "referral_sender_yearly_2_months_v1"
+SENDER_MONTHLY_PROMOTIONAL_OFFER_3_MONTHS_ID = "referral_sender_month_3_v1"
+SENDER_YEARLY_PROMOTIONAL_OFFER_3_MONTHS_ID = "referral_sender_yearly_3_months_v1"
+SENDER_MONTHLY_PROMOTIONAL_OFFER_6_MONTHS_ID = "referral_sender_month_6_v1"
+SENDER_YEARLY_PROMOTIONAL_OFFER_6_MONTHS_ID = "referral_sender_yearly_6_months_v1"
+SENDER_MONTHLY_PROMOTIONAL_OFFER_12_MONTHS_ID = "referral_sender_month_12_v1"
+SENDER_YEARLY_PROMOTIONAL_OFFER_12_MONTHS_ID = "referral_sender_yearly_12_months_v1"
+SENDER_NEW_MONTHLY_OFFER_ID = "REPLACE_WITH_OFFER_REFERENCE"
+SENDER_NEW_YEARLY_OFFER_ID = "REPLACE_WITH_OFFER_REFERENCE"
+CONFIG_JSON = '{"schemaVersion":1,"enabled":false,"redemptionEnabled":false,"renewalProduct":"monthly","senderCreditDays":30,"recipientFreeDays":30,"maxBankedCredits":24,"maxCreditsPerRedemption":12,"extensionWindowDays":7,"maxRewardedReferralsPerRolling30Days":10,"maxOutstandingClaims":20,"reservationMinutes":30,"hidePolicy":"proOnly","copyVariant":"giftMonthV1","localizedCopy":{"en":{"headline":"Give a month. Get a month.","body":"Invite someone. When they redeem their free month, you will earn one too."}}}'
+
+[[d1_databases]]
+binding = "DB"
+database_name = "referralkit"
+database_id = "REPLACE_WITH_PRODUCTION_D1_DATABASE_ID"
+
+[triggers]
+crons = ["*/10 * * * *"]
+
+[env.staging]
+name = "referralkit-staging"
+workers_dev = true
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+PUBLIC_SITE_URL = "https://staging.example.com"
+APP_STORE_URL = "https://apps.apple.com/app/id1234567890"
+APP_STORE_ID = "1234567890"
+APP_NAME = "Example App"
+PRO_NAME = "Example Pro"
+CODE_PREFIX = "EXMP"
+AUTH_HEADER_PREFIX = "Example"
+REGISTRATION_ATTRIBUTE_KEY = "example_referral_registration_challenge"
+REVENUECAT_API_BASE = "https://api.revenuecat.com/v1"
+REVENUECAT_TRANSACTION_ENVIRONMENT = "SANDBOX"
+REVENUECAT_ENTITLEMENT = "Example Pro"
+MONTHLY_PRODUCT_ID = "com.example.pro.monthly"
+YEARLY_PRODUCT_ID = "com.example.pro.yearly"
+LIFETIME_PRODUCT_IDS = "com.example.pro.lifetime"
+RECIPIENT_MONTHLY_OFFER_ID = "REPLACE_WITH_OFFER_REFERENCE"
+RECIPIENT_YEARLY_OFFER_ID = "REPLACE_WITH_OFFER_REFERENCE"
+SENDER_MONTHLY_PROMOTIONAL_OFFER_ID = "referral_sender_month_v1"
+SENDER_YEARLY_PROMOTIONAL_OFFER_ID = "referral_sender_yearly_month_v1"
+SENDER_MONTHLY_PROMOTIONAL_OFFER_2_MONTHS_ID = "referral_sender_month_2_v1"
+SENDER_YEARLY_PROMOTIONAL_OFFER_2_MONTHS_ID = "referral_sender_yearly_2_months_v1"
+SENDER_MONTHLY_PROMOTIONAL_OFFER_3_MONTHS_ID = "referral_sender_month_3_v1"
+SENDER_YEARLY_PROMOTIONAL_OFFER_3_MONTHS_ID = "referral_sender_yearly_3_months_v1"
+SENDER_MONTHLY_PROMOTIONAL_OFFER_6_MONTHS_ID = "referral_sender_month_6_v1"
+SENDER_YEARLY_PROMOTIONAL_OFFER_6_MONTHS_ID = "referral_sender_yearly_6_months_v1"
+SENDER_MONTHLY_PROMOTIONAL_OFFER_12_MONTHS_ID = "referral_sender_month_12_v1"
+SENDER_YEARLY_PROMOTIONAL_OFFER_12_MONTHS_ID = "referral_sender_yearly_12_months_v1"
+SENDER_NEW_MONTHLY_OFFER_ID = "REPLACE_WITH_OFFER_REFERENCE"
+SENDER_NEW_YEARLY_OFFER_ID = "REPLACE_WITH_OFFER_REFERENCE"
+CONFIG_JSON = '{"schemaVersion":1,"enabled":false,"redemptionEnabled":false,"renewalProduct":"monthly","senderCreditDays":30,"recipientFreeDays":30,"maxBankedCredits":24,"maxCreditsPerRedemption":12,"extensionWindowDays":7,"maxRewardedReferralsPerRolling30Days":10,"maxOutstandingClaims":20,"reservationMinutes":30,"hidePolicy":"proOnly","copyVariant":"giftMonthV1","localizedCopy":{"en":{"headline":"Give a month. Get a month.","body":"Invite someone. When they redeem their free month, you will earn one too."}}}'
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "referralkit-staging"
+database_id = "REPLACE_WITH_STAGING_D1_DATABASE_ID"
+
+[env.staging.triggers]
+crons = ["*/10 * * * *"]

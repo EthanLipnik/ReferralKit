@@ -1,0 +1,34 @@
+{
+  "app_id": "1234567890",
+  "subscriptions": [
+    {
+      "product": "com.example.pro.monthly",
+      "offer_codes": [
+        {
+          "name": "Referral recipient — one month",
+          "offer_eligibility": "STACK_WITH_INTRO_OFFERS",
+          "customer_eligibilities": ["NEW"],
+          "offer_duration": "ONE_MONTH",
+          "offer_mode": "FREE_TRIAL",
+          "number_of_periods": 1,
+          "prices": ["US", "GB"],
+          "one_time_codes": {
+            "quantity": 100,
+            "expiration_date": "2027-01-31",
+            "output": "./private/referral-recipient-codes.txt"
+          }
+        }
+      ],
+      "promotional_offers": [
+        {
+          "offer_code": "referral_sender_month_v1",
+          "name": "Referral sender — one month",
+          "offer_duration": "ONE_MONTH",
+          "offer_mode": "FREE_TRIAL",
+          "number_of_periods": 1,
+          "prices": ["PROMOTIONAL_OFFER_PRICE_ID"]
+        }
+      ]
+    }
+  ]
+}

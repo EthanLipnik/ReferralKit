@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+.DS_Store
+*.state.json
+private/
+Worker/.dev.vars
+Worker/.wrangler/
+Worker/node_modules/

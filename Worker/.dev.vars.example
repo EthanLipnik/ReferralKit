@@ -1,0 +1,6 @@
+REVENUECAT_SECRET_KEY="sandbox-secret-api-key"
+REVENUECAT_WEBHOOK_SECRET="generate-a-random-value"
+CODE_HASH_SECRET="generate-a-random-value"
+IDENTITY_HASH_SECRET="generate-a-different-random-value"
+OFFER_CODE_ENCRYPTION_KEY="base64-encoded-32-byte-key"
+OFFER_CODE_IMPORT_SECRET="generate-a-random-admin-value"
