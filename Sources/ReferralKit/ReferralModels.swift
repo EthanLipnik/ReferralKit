@@ -44,6 +44,67 @@ public struct ReferralRedemptionStatus: Codable, Equatable, Sendable {
     }
 }
 
+public enum ReferralPendingActivationState: String, Codable, Sendable {
+    case reserved
+    case presented
+}
+
+public struct ReferralPendingActivation: Codable, Equatable, Sendable {
+    public var reservationID: String
+    public var kind: ReferralFulfillmentKind
+    public var state: ReferralPendingActivationState
+    public var expiresAt: Date
+
+    public init(
+        reservationID: String,
+        kind: ReferralFulfillmentKind,
+        state: ReferralPendingActivationState,
+        expiresAt: Date
+    ) {
+        self.reservationID = reservationID
+        self.kind = kind
+        self.state = state
+        self.expiresAt = expiresAt
+    }
+}
+
+public enum ReferralHistoryRole: String, Codable, Sendable {
+    case sent
+    case received
+}
+
+public enum ReferralHistoryStatus: String, Codable, Sendable {
+    case pending
+    case redeemed
+    case expired
+    case unavailable
+}
+
+public struct ReferralHistoryEntry: Codable, Equatable, Identifiable, Sendable {
+    public var id: String
+    public var role: ReferralHistoryRole
+    public var status: ReferralHistoryStatus
+    public var code: String
+    public var claimedAt: Date
+    public var redeemedAt: Date?
+
+    public init(
+        id: String,
+        role: ReferralHistoryRole,
+        status: ReferralHistoryStatus,
+        code: String,
+        claimedAt: Date,
+        redeemedAt: Date? = nil
+    ) {
+        self.id = id
+        self.role = role
+        self.status = status
+        self.code = code
+        self.claimedAt = claimedAt
+        self.redeemedAt = redeemedAt
+    }
+}
+
 public struct ReferralAccountSnapshot: Codable, Equatable, Sendable {
     public var availableCredits: Int
     public var reservedCredits: Int
@@ -52,6 +113,8 @@ public struct ReferralAccountSnapshot: Codable, Equatable, Sendable {
     public var isLifetime: Bool
     public var share: ReferralShare?
     public var redemption: ReferralRedemptionStatus?
+    public var pendingActivation: ReferralPendingActivation?
+    public var history: [ReferralHistoryEntry]?
 
     public init(
         availableCredits: Int,
@@ -60,7 +123,9 @@ public struct ReferralAccountSnapshot: Codable, Equatable, Sendable {
         canEarnCredits: Bool,
         isLifetime: Bool,
         share: ReferralShare?,
-        redemption: ReferralRedemptionStatus? = nil
+        redemption: ReferralRedemptionStatus? = nil,
+        pendingActivation: ReferralPendingActivation? = nil,
+        history: [ReferralHistoryEntry]? = nil
     ) {
         self.availableCredits = availableCredits
         self.reservedCredits = reservedCredits
@@ -69,6 +134,8 @@ public struct ReferralAccountSnapshot: Codable, Equatable, Sendable {
         self.isLifetime = isLifetime
         self.share = share
         self.redemption = redemption
+        self.pendingActivation = pendingActivation
+        self.history = history
     }
 
     public var displayCreditCount: Int? {

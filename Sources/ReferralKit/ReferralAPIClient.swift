@@ -12,6 +12,8 @@ public protocol ReferralAPIClientProtocol: Sendable {
     func createShare(identity: ReferralIdentity) async throws -> ReferralShare
     func claim(code: String, identity: ReferralIdentity) async throws -> ReferralFulfillment
     func redeemCredit(identity: ReferralIdentity) async throws -> ReferralFulfillment
+    func resumeRedemption(reservationID: String, identity: ReferralIdentity) async throws -> ReferralFulfillment
+    func markPresented(reservationID: String, identity: ReferralIdentity) async throws
 }
 
 public protocol ReferralHTTPTransport: Sendable {
@@ -103,6 +105,7 @@ public struct ReferralAPIClient: ReferralAPIClientProtocol, Sendable {
         var operationID: String
     }
     private struct RedemptionRequest: Codable { var operationID: String }
+    private struct PresentedRequest: Codable { var reservationID: String }
     private struct Empty: Codable {}
     private enum RegistrationVerificationError: Error { case pending }
     private struct ErrorResponse: Decodable {
@@ -190,6 +193,27 @@ public struct ReferralAPIClient: ReferralAPIClientProtocol, Sendable {
             body: RedemptionRequest(operationID: operationID),
             identity: identity,
             idempotencyKey: operationID
+        )
+    }
+
+    public func markPresented(reservationID: String, identity: ReferralIdentity) async throws {
+        let _: Empty = try await send(
+            path: "/v1/redemptions/presented",
+            method: "POST",
+            body: PresentedRequest(reservationID: reservationID),
+            identity: identity
+        )
+    }
+
+    public func resumeRedemption(
+        reservationID: String,
+        identity: ReferralIdentity
+    ) async throws -> ReferralFulfillment {
+        try await send(
+            path: "/v1/redemptions/resume",
+            method: "POST",
+            body: PresentedRequest(reservationID: reservationID),
+            identity: identity
         )
     }
 

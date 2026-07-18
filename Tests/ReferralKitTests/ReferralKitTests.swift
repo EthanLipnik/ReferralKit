@@ -13,6 +13,37 @@ import Testing
 @Suite("ReferralKit")
 @MainActor
 struct ReferralKitTests {
+    @Test("Account snapshots decode referral history and remain compatible without it")
+    func accountSnapshotHistoryDecoding() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let snapshot = try decoder.decode(
+            ReferralAccountSnapshot.self,
+            from: Data(
+                """
+                {"availableCredits":0,"reservedCredits":1,"pendingRewards":0,"canEarnCredits":true,"isLifetime":false,"share":null,"pendingActivation":{"reservationID":"reservation-1","kind":"promotional_offer","state":"presented","expiresAt":"2026-07-18T03:23:23Z"},"history":[{"id":"referral-1","role":"received","status":"redeemed","code":"DEMO-7K4P","claimedAt":"2026-07-16T10:00:00Z","redeemedAt":"2026-07-16T10:05:00Z"}]}
+                """.utf8
+            )
+        )
+        #expect(snapshot.history?.first?.code == "DEMO-7K4P")
+        #expect(snapshot.history?.first?.role == .received)
+        #expect(snapshot.history?.first?.status == .redeemed)
+        #expect(snapshot.pendingActivation?.reservationID == "reservation-1")
+        #expect(snapshot.pendingActivation?.kind == .promotionalOffer)
+        #expect(snapshot.pendingActivation?.state == .presented)
+
+        let legacySnapshot = try decoder.decode(
+            ReferralAccountSnapshot.self,
+            from: Data(
+                """
+                {"availableCredits":0,"reservedCredits":0,"pendingRewards":0,"canEarnCredits":true,"isLifetime":false,"share":null}
+                """.utf8
+            )
+        )
+        #expect(legacySnapshot.history == nil)
+        #expect(legacySnapshot.pendingActivation == nil)
+    }
+
     @Test("Codes and public links use application configuration")
     func codeAndLinkParsing() throws {
         let configuration = try testConfiguration()
@@ -159,6 +190,26 @@ struct ReferralKitTests {
         #expect(operationIDs.count == 2)
         #expect(operationIDs.allSatisfy { !$0.isEmpty })
         #expect(Set(operationIDs).count == 2)
+    }
+
+    @Test("Pending redemptions resume through the dedicated endpoint")
+    func resumePendingRedemption() async throws {
+        let transport = ResumeRedemptionTransport()
+        let client = ReferralAPIClient(
+            configuration: try testConfiguration(),
+            transport: transport,
+            signer: ReferralRequestSignerMock(),
+            challengeSynchronizer: ReferralChallengeSynchronizerMock(startsBlocked: false)
+        )
+
+        let fulfillment = try await client.resumeRedemption(
+            reservationID: "reservation-1",
+            identity: ReferralIdentity(customerID: "customer-resume", source: "test")
+        )
+
+        #expect(fulfillment.reservationID == "reservation-1")
+        #expect(await transport.requestPath == "/v1/redemptions/resume")
+        #expect(await transport.reservationID == "reservation-1")
     }
 
     @Test("Lost mutation response retries the same operation with a fresh signature nonce")
@@ -375,6 +426,32 @@ private actor SuccessfulClaimCapturingTransport: ReferralHTTPTransport {
     }
 }
 
+private actor ResumeRedemptionTransport: ReferralHTTPTransport {
+    private(set) var requestPath: String?
+    private(set) var reservationID: String?
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        guard let url = request.url else { throw ReferralTestError.invalidResponse }
+        requestPath = url.path
+        if let body = request.httpBody,
+           let value = try? JSONSerialization.jsonObject(with: body) as? [String: String] {
+            reservationID = value["reservationID"]
+        }
+        guard let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        ) else {
+            throw ReferralTestError.invalidResponse
+        }
+        let body = """
+        {"reservationID":"reservation-1","kind":"offer_code","offerCode":"TEST-CODE","offerURL":"https://apps.apple.com/redeem?code=TEST-CODE","productIdentifier":"example_pro_monthly","freeMonths":1,"expiresAt":"2030-01-01T00:00:00Z"}
+        """
+        return (Data(body.utf8), response)
+    }
+}
+
 private actor LostResponseClaimTransport: ReferralHTTPTransport {
     struct CapturedRequest: Sendable {
         var operationID: String?
@@ -539,4 +616,13 @@ private final class ReferralAPIMock: ReferralAPIClientProtocol {
     func redeemCredit(identity _: ReferralIdentity) async throws -> ReferralFulfillment {
         throw ReferralError.serviceUnavailable
     }
+
+    func resumeRedemption(
+        reservationID _: String,
+        identity _: ReferralIdentity
+    ) async throws -> ReferralFulfillment {
+        throw ReferralError.serviceUnavailable
+    }
+
+    func markPresented(reservationID _: String, identity _: ReferralIdentity) async throws {}
 }

@@ -123,6 +123,35 @@ public final class ReferralManager {
         }
     }
 
+    public func markPresented(reservationID: String) async throws {
+        let identity = try requireIdentity()
+        do {
+            try await api.markPresented(reservationID: reservationID, identity: identity)
+            lastError = nil
+            await refresh()
+        } catch {
+            let referralError = Self.referralError(error)
+            lastError = referralError
+            throw referralError
+        }
+    }
+
+    public func resumeRedemption(reservationID: String) async throws -> ReferralFulfillment {
+        let identity = try requireIdentity()
+        do {
+            let fulfillment = try await api.resumeRedemption(
+                reservationID: reservationID,
+                identity: identity
+            )
+            lastError = nil
+            return fulfillment
+        } catch {
+            let referralError = Self.referralError(error)
+            lastError = referralError
+            throw referralError
+        }
+    }
+
     @discardableResult
     public func handle(url: URL) -> Bool {
         guard let code = configuration.referralCode(from: url) else { return false }
