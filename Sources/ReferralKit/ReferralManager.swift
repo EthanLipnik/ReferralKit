@@ -12,6 +12,7 @@ import Observation
 @MainActor
 public final class ReferralManager {
     private struct CachedSnapshot: Codable {
+        var customerID: String
         var snapshot: ReferralAccountSnapshot
         var storedAt: Date
     }
@@ -52,6 +53,7 @@ public final class ReferralManager {
         snapshot = Self.loadCachedSnapshot(
             defaults: defaults,
             key: configuration.snapshotCacheKey,
+            customerID: identityProvider()?.customerID,
             lifetime: configuration.snapshotCacheLifetime,
             now: now()
         )
@@ -170,7 +172,8 @@ public final class ReferralManager {
 
     private func updateSnapshot(_ next: ReferralAccountSnapshot) {
         snapshot = next
-        let cached = CachedSnapshot(snapshot: next, storedAt: now())
+        guard let customerID = identityProvider()?.customerID else { return }
+        let cached = CachedSnapshot(customerID: customerID, snapshot: next, storedAt: now())
         if let data = try? JSONEncoder().encode(cached) {
             defaults.set(data, forKey: configuration.snapshotCacheKey)
         }
@@ -179,11 +182,14 @@ public final class ReferralManager {
     private static func loadCachedSnapshot(
         defaults: UserDefaults,
         key: String,
+        customerID: String?,
         lifetime: TimeInterval,
         now: Date
     ) -> ReferralAccountSnapshot? {
-        guard let data = defaults.data(forKey: key),
+        guard let customerID,
+              let data = defaults.data(forKey: key),
               let cached = try? JSONDecoder().decode(CachedSnapshot.self, from: data),
+              cached.customerID == customerID,
               now.timeIntervalSince(cached.storedAt) <= lifetime else { return nil }
         return cached.snapshot
     }

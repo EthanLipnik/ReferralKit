@@ -4,6 +4,7 @@ import {HTTPError} from "./http";
 export interface CustomerState {
     activePro: boolean;
     activeSubscriptionProduct?: Product;
+    activeSubscriptionExpiresAt?: string;
     hasPriorSubscription: boolean;
     lifetime: boolean;
     aliases: string[];
@@ -106,6 +107,11 @@ export async function customerState(env: Env, customerID: string): Promise<Custo
         env.YEARLY_PRODUCT_ID,
         env.REVENUECAT_TRANSACTION_ENVIRONMENT
     );
+    const activeEntitlement = subscriber?.entitlements?.[env.REVENUECAT_ENTITLEMENT];
+    const activeSubscriptionExpiresAt = activeSubscriptionProduct &&
+        typeof activeEntitlement?.expires_date === "string"
+        ? activeEntitlement.expires_date
+        : undefined;
     const lifetime = hasLifetimePurchase(
         subscriber,
         lifetimeProductIDs,
@@ -121,6 +127,7 @@ export async function customerState(env: Env, customerID: string): Promise<Custo
     return {
         activePro: activeSubscriptionProduct !== undefined || lifetime,
         activeSubscriptionProduct,
+        activeSubscriptionExpiresAt,
         hasPriorSubscription,
         lifetime,
         aliases: Array.isArray(subscriber.aliases)
@@ -146,9 +153,18 @@ export interface RCEvent {
     transaction_id?: string;
     product_id?: string;
     offer_code?: string;
+    discount_identifier?: string;
     presented_offering_id?: string;
     environment?: string;
     cancel_reason?: string;
+    purchased_at_ms?: number;
+    event_timestamp_ms?: number;
+}
+
+export function transactionOccurredAt(event: RCEvent, fallback: string): string {
+    const timestamp = event.purchased_at_ms ?? event.event_timestamp_ms;
+    if (typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp <= 0) return fallback;
+    return new Date(timestamp).toISOString();
 }
 
 export function acceptsTransactionEnvironment(configured: string, received: string | undefined): boolean {

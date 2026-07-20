@@ -46,12 +46,16 @@ struct ReferralKitTests {
 
     @Test("Codes and public links use application configuration")
     func codeAndLinkParsing() throws {
-        let configuration = try testConfiguration()
+        var configuration = try testConfiguration()
         #expect(configuration.normalizedCode("demo-7k4p-q9tx") == "DEMO7K4PQ9TX")
         #expect(configuration.normalizedCode("short") == nil)
         #expect(configuration.referralCode(from: URL(string: "https://example.com/r/demo-7k4p-q9tx")!) == "DEMO7K4PQ9TX")
         #expect(configuration.referralCode(from: URL(string: "https://other.example/r/demo-7k4p-q9tx")!) == nil)
         #expect(configuration.referralCode(from: URL(string: "http://example.com/r/demo-7k4p-q9tx")!) == nil)
+        configuration.additionalPublicReferralHosts = ["staging.example.com"]
+        #expect(configuration.referralCode(
+            from: URL(string: "https://staging.example.com/r/demo-7k4p-q9tx")!
+        ) == "DEMO7K4PQ9TX")
     }
 
     @Test("Manager holds a deep-linked code until redemption")
@@ -257,11 +261,55 @@ struct ReferralKitTests {
         let restored = ReferralManager(
             api: api,
             configuration: configuration,
-            identityProvider: { nil },
+            identityProvider: { ReferralIdentity(customerID: "customer", source: "test") },
             defaults: defaults,
             now: { start.addingTimeInterval(61) }
         )
         #expect(restored.snapshot == nil)
+    }
+
+    @Test("Manager snapshots are restored only for the identity that cached them")
+    func cacheIdentityIsolation() async throws {
+        let defaults = isolatedDefaults()
+        let now = Date(timeIntervalSince1970: 20_000)
+        let configuration = try testConfiguration()
+        let api = ReferralAPIMock()
+        let first = ReferralManager(
+            api: api,
+            configuration: configuration,
+            identityProvider: { ReferralIdentity(customerID: "customer-a", source: "test") },
+            defaults: defaults,
+            now: { now }
+        )
+        await first.refresh()
+        #expect(first.snapshot != nil)
+
+        let sameIdentity = ReferralManager(
+            api: api,
+            configuration: configuration,
+            identityProvider: { ReferralIdentity(customerID: "customer-a", source: "test") },
+            defaults: defaults,
+            now: { now.addingTimeInterval(1) }
+        )
+        #expect(sameIdentity.snapshot != nil)
+
+        let differentIdentity = ReferralManager(
+            api: api,
+            configuration: configuration,
+            identityProvider: { ReferralIdentity(customerID: "customer-b", source: "test") },
+            defaults: defaults,
+            now: { now.addingTimeInterval(1) }
+        )
+        #expect(differentIdentity.snapshot == nil)
+
+        let unavailableIdentity = ReferralManager(
+            api: api,
+            configuration: configuration,
+            identityProvider: { nil },
+            defaults: defaults,
+            now: { now.addingTimeInterval(1) }
+        )
+        #expect(unavailableIdentity.snapshot == nil)
     }
 
     private func testConfiguration() throws -> ReferralConfiguration {

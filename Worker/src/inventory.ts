@@ -10,13 +10,23 @@ export interface OfferCodeImport {
     codes: string[];
 }
 
-function allowedOfferReferences(env: Env): Set<string> {
-    return new Set([
-        env.RECIPIENT_MONTHLY_OFFER_ID,
-        env.RECIPIENT_YEARLY_OFFER_ID,
-        env.SENDER_NEW_MONTHLY_OFFER_ID,
-        env.SENDER_NEW_YEARLY_OFFER_ID
-    ].filter(value => value && !value.startsWith("REPLACE_")));
+export function offerCodeProductMappings(env: Env): Map<string, Product> {
+    const entries: Array<[string, Product]> = [
+        [env.RECIPIENT_MONTHLY_OFFER_ID, "monthly"],
+        [env.RECIPIENT_YEARLY_OFFER_ID, "yearly"],
+        [env.SENDER_NEW_MONTHLY_OFFER_ID, "monthly"],
+        [env.SENDER_NEW_YEARLY_OFFER_ID, "yearly"]
+    ];
+    const mappings = new Map<string, Product>();
+    for (const [reference, product] of entries) {
+        if (!reference || reference.startsWith("REPLACE_")) continue;
+        const existing = mappings.get(reference);
+        if (existing && existing !== product) {
+            throw new HTTPError(503, "offer_reference_configuration_conflict");
+        }
+        mappings.set(reference, product);
+    }
+    return mappings;
 }
 
 function normalizedAppleCode(value: string): string {
@@ -26,12 +36,14 @@ function normalizedAppleCode(value: string): string {
 }
 
 export async function importOfferCodes(env: Env, input: OfferCodeImport): Promise<number> {
-    if (!allowedOfferReferences(env).has(input.offerReference)) {
+    const expectedProduct = offerCodeProductMappings(env).get(input.offerReference);
+    if (!expectedProduct) {
         throw new HTTPError(400, "unknown_offer_reference");
     }
     if (!(["monthly", "yearly"] as string[]).includes(input.product) || !Array.isArray(input.codes)) {
         throw new HTTPError(400, "invalid_offer_code_import");
     }
+    if (input.product !== expectedProduct) throw new HTTPError(400, "offer_product_mismatch");
     const uniqueCodes = [...new Set(input.codes.map(normalizedAppleCode))];
     if (uniqueCodes.length < 1 || uniqueCodes.length > 10_000) {
         throw new HTTPError(400, "invalid_offer_code_count");
@@ -55,15 +67,22 @@ export async function reserveOfferCode(
     product: Product,
     redemptionID: string
 ): Promise<string> {
-    const candidate = await env.DB.prepare(
-        "SELECT id,encrypted_code FROM offer_code_inventory WHERE offer_reference=? AND product=? AND status='available' ORDER BY created_at,id LIMIT 1"
-    ).bind(offerReference, product).first<{id:string;encrypted_code:string}>();
-    if (!candidate) throw new HTTPError(503, "offer_code_inventory_empty");
-    const updated = await env.DB.prepare(
-        "UPDATE offer_code_inventory SET status='reserved',reservation_id=?,updated_at=? WHERE id=? AND status='available'"
-    ).bind(redemptionID, now(), candidate.id).run();
-    if (Number(updated.meta?.changes || 0) !== 1) throw new HTTPError(409, "offer_code_allocation_conflict");
-    return decryptOfferCode(env.OFFER_CODE_ENCRYPTION_KEY, candidate.encrypted_code);
+    for (let attempt = 0; attempt < 5; attempt++) {
+        const candidate = await env.DB.prepare(
+            "SELECT id,encrypted_code FROM offer_code_inventory WHERE offer_reference=? AND product=? AND status='available' ORDER BY created_at,id LIMIT 1"
+        ).bind(offerReference, product).first<{id:string;encrypted_code:string}>();
+        if (!candidate) throw new HTTPError(503, "offer_code_inventory_empty");
+        // Returning the plaintext code discloses it to the customer. Apple codes cannot be
+        // revoked after disclosure, so assignment is intentionally irreversible even if the
+        // local redemption later expires.
+        const updated = await env.DB.prepare(
+            "UPDATE offer_code_inventory SET status='assigned',reservation_id=?,updated_at=? WHERE id=? AND status='available'"
+        ).bind(redemptionID, now(), candidate.id).run();
+        if (Number(updated.meta?.changes || 0) === 1) {
+            return decryptOfferCode(env.OFFER_CODE_ENCRYPTION_KEY, candidate.encrypted_code);
+        }
+    }
+    throw new HTTPError(409, "offer_code_allocation_conflict");
 }
 
 export async function offerCodeForReservation(env: Env, redemptionID: string): Promise<string | null> {
@@ -74,6 +93,8 @@ export async function offerCodeForReservation(env: Env, redemptionID: string): P
 }
 
 export async function releaseOfferCode(env: Env, redemptionID: string): Promise<void> {
+    // Only pre-disclosure reservations are reusable. Current allocation assigns in one
+    // guarded write, but retaining this path safely handles older in-flight rows.
     await env.DB.prepare(
         "UPDATE offer_code_inventory SET status='available',reservation_id=NULL,updated_at=? WHERE reservation_id=? AND status='reserved' AND EXISTS(SELECT 1 FROM redemptions WHERE id=? AND status IN ('expired','failed'))"
     ).bind(now(), redemptionID, redemptionID).run();

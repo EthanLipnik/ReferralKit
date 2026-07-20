@@ -1,4 +1,4 @@
-import { normalizeCode, isValidCode } from "./crypto";
+import { hmac, normalizeCode, isValidCode } from "./crypto";
 import { Env } from "./env";
 import { HTTPError } from "./http";
 
@@ -15,11 +15,15 @@ function escapeHTML(value: string): string {
     );
 }
 
-export function landing(request: Request, env: Env, code: string): Response {
+export async function landing(request: Request, env: Env, code: string): Promise<Response> {
     const normalizedCode = normalizeCode(code, env.CODE_PREFIX);
     if (!isValidCode(normalizedCode, env.CODE_PREFIX)) {
         throw new HTTPError(404, "not_found");
     }
+    const existing = await env.DB.prepare(
+        "SELECT 1 present FROM referral_codes WHERE code_hash=? AND revoked_at IS NULL"
+    ).bind(await hmac(env.CODE_HASH_SECRET, normalizedCode)).first<{present: number}>();
+    if (!existing) throw new HTTPError(404, "not_found");
 
     const escapedCode = escapeHTML(normalizedCode);
     const appName = escapeHTML(env.APP_NAME);

@@ -29,6 +29,7 @@ public struct ReferralConfiguration: Sendable {
 
     public var baseURL: URL
     public var publicReferralHost: String
+    public var additionalPublicReferralHosts: Set<String>
     public var referralPathComponent: String
     public var codeLengthRange: ClosedRange<Int>
     public var headers: HeaderNames
@@ -41,6 +42,7 @@ public struct ReferralConfiguration: Sendable {
     public init(
         baseURL: URL,
         publicReferralHost: String,
+        additionalPublicReferralHosts: Set<String> = [],
         referralPathComponent: String = "r",
         codeLengthRange: ClosedRange<Int> = 8 ... 24,
         headers: HeaderNames = HeaderNames(),
@@ -59,6 +61,7 @@ public struct ReferralConfiguration: Sendable {
     ) {
         self.baseURL = baseURL
         self.publicReferralHost = publicReferralHost.lowercased()
+        self.additionalPublicReferralHosts = Set(additionalPublicReferralHosts.map { $0.lowercased() })
         self.referralPathComponent = referralPathComponent
         self.codeLengthRange = codeLengthRange
         self.headers = headers
@@ -76,8 +79,9 @@ public struct ReferralConfiguration: Sendable {
     }
 
     public func referralCode(from url: URL) -> String? {
+        let allowedHosts = additionalPublicReferralHosts.union([publicReferralHost])
         guard url.scheme?.lowercased() == "https",
-              url.host?.lowercased() == publicReferralHost else { return nil }
+              url.host.map({ allowedHosts.contains($0.lowercased()) }) == true else { return nil }
         let components = url.pathComponents.filter { $0 != "/" }
         guard components.count == 2,
               components[0].lowercased() == referralPathComponent.lowercased() else { return nil }

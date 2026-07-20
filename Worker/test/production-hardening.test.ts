@@ -7,12 +7,14 @@ import {
     processRevenueCatEvent,
     resolveRegistrationAccount,
     resolveWebhookAccount,
-    route
+    route,
+    verifyRevenueCatWebhookSignature
 } from "../src/index";
 import {registeredDevicesForIdentity} from "../src/auth";
 import {HTTPError} from "../src/http";
 import {RCEvent} from "../src/revenuecat";
-import {decryptOfferCode, encryptOfferCode, sha256} from "../src/crypto";
+import {decryptOfferCode, encryptOfferCode, hmac, sha256} from "../src/crypto";
+import {activeReservationByID, referralHistory} from "../src/domain";
 
 const baseConfig: ReferralConfig = {
     schemaVersion: 1,
@@ -37,6 +39,7 @@ function testEnv(database: unknown, config: Partial<ReferralConfig> = {}): Env {
         DB: database as D1Database,
         ENVIRONMENT: "staging",
         PUBLIC_SITE_URL: "https://staging.example.com",
+        ASSOCIATED_APP_IDS: "TEAMID.com.example.App",
         APP_STORE_URL: "https://apps.apple.com/app/id123",
         APP_STORE_ID: "123",
         APP_NAME: "Example",
@@ -47,6 +50,7 @@ function testEnv(database: unknown, config: Partial<ReferralConfig> = {}): Env {
         REVENUECAT_API_BASE: "https://api.revenuecat.test/v1",
         REVENUECAT_SECRET_KEY: "test-secret",
         REVENUECAT_WEBHOOK_SECRET: "test-webhook-secret",
+        REVENUECAT_WEBHOOK_SIGNING_SECRET: "test-signing-secret",
         REVENUECAT_TRANSACTION_ENVIRONMENT: "SANDBOX",
         REVENUECAT_ENTITLEMENT: "Example Pro",
         MONTHLY_PRODUCT_ID: "example_pro_monthly",
@@ -54,6 +58,8 @@ function testEnv(database: unknown, config: Partial<ReferralConfig> = {}): Env {
         LIFETIME_PRODUCT_IDS: "example_pro_lifetime",
         RECIPIENT_MONTHLY_OFFER_ID: "recipient-monthly",
         RECIPIENT_YEARLY_OFFER_ID: "recipient-yearly",
+        RECIPIENT_MONTHLY_OFFER_REFERENCE_NAME: "Recipient Monthly Reference",
+        RECIPIENT_YEARLY_OFFER_REFERENCE_NAME: "Recipient Yearly Reference",
         SENDER_MONTHLY_PROMOTIONAL_OFFER_ID: "sender-monthly-1",
         SENDER_YEARLY_PROMOTIONAL_OFFER_ID: "sender-yearly-1",
         SENDER_MONTHLY_PROMOTIONAL_OFFER_2_MONTHS_ID: "sender-monthly-2",
@@ -81,7 +87,7 @@ function event(overrides: Partial<RCEvent> = {}): RCEvent {
         app_user_id: "recipient-rc-id",
         transaction_id: "transaction-1",
         product_id: "example_pro_monthly",
-        offer_code: "recipient-monthly",
+        offer_code: "Recipient Monthly Reference",
         environment: "SANDBOX",
         ...overrides
     };
@@ -97,6 +103,118 @@ test("production kill switches block enrollment while allowing earned-credit red
     assert.equal(operationAllowed("/v1/codes", fullStop), false);
     assert.equal(operationAllowed("/v1/referrals/claim", fullStop), false);
     assert.equal(operationAllowed("/v1/credits/redeem", fullStop), false);
+});
+
+test("staging can serve referral Universal Link association without a redirect", async () => {
+    const response = await route(
+        new Request("https://staging.example.com/.well-known/apple-app-site-association"),
+        testEnv({})
+    );
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "application/json");
+    assert.deepEqual(await response.json(), {
+        applinks: {
+            details: [{
+                appIDs: ["TEAMID.com.example.App"],
+                components: [{"/": "/r/*", comment: "Referral links"}]
+            }]
+        }
+    });
+});
+
+test("RevenueCat webhook signatures require a valid fresh HMAC", async () => {
+    const raw = JSON.stringify({event: {id: "event-1"}});
+    const timestamp = "1784044800";
+    const signature = await hmac("signing-secret", `${timestamp}.${raw}`);
+    const header = `t=${timestamp},v1=${signature}`;
+    const now = Number(timestamp) * 1_000;
+    assert.equal(await verifyRevenueCatWebhookSignature(raw, header, "signing-secret", now), true);
+    assert.equal(await verifyRevenueCatWebhookSignature(`${raw} `, header, "signing-secret", now), false);
+    assert.equal(await verifyRevenueCatWebhookSignature(raw, header, "wrong-secret", now), false);
+    assert.equal(await verifyRevenueCatWebhookSignature(raw, header, "signing-secret", now + 300_001), false);
+    assert.equal(await verifyRevenueCatWebhookSignature(raw, null, "signing-secret", now), false);
+});
+
+test("referral history reports roles, codes, and privacy-safe statuses", async () => {
+    const database = {
+        prepare: (sql: string) => new TestStatement(sql, {
+            all: async parameters => {
+                assert.deepEqual(parameters, ["account-1", "account-1"]);
+                return {results: [
+                    {
+                        id: "referral-sent",
+                        sender_account_id: "account-1",
+                        status: "redeemed",
+                        display_code: "DEMO-SENT",
+                        claimed_at: "2026-07-16T10:00:00.000Z",
+                        redeemed_at: "2026-07-16T10:05:00.000Z"
+                    },
+                    {
+                        id: "referral-received",
+                        sender_account_id: "account-2",
+                        status: "offer_reserved",
+                        display_code: "DEMO-RECEIVED",
+                        claimed_at: "2026-07-15T10:00:00.000Z",
+                        redeemed_at: null
+                    }
+                ]};
+            }
+        })
+    };
+
+    assert.deepEqual(await referralHistory(testEnv(database), "account-1"), [
+        {
+            id: "referral-sent",
+            role: "sent",
+            status: "redeemed",
+            code: "DEMO-SENT",
+            claimedAt: "2026-07-16T10:00:00.000Z",
+            redeemedAt: "2026-07-16T10:05:00.000Z"
+        },
+        {
+            id: "referral-received",
+            role: "received",
+            status: "pending",
+            code: "DEMO-RECEIVED",
+            claimedAt: "2026-07-15T10:00:00.000Z"
+        }
+    ]);
+});
+
+test("active offer-code reservations resume with the same code", async () => {
+    const encryptedCode = await encryptOfferCode(
+        testEnv({}).OFFER_CODE_ENCRYPTION_KEY,
+        "SAME-OFFER-CODE"
+    );
+    const database = {
+        prepare: (sql: string) => new TestStatement(sql, {
+            first: async parameters => {
+                if (sql.includes("FROM redemptions r LEFT JOIN credit_ledger")) {
+                    assert.equal(parameters[0], "reservation-1");
+                    assert.equal(parameters[1], "account-1");
+                    return {
+                        id: "reservation-1",
+                        fulfillment_type: "offer_code",
+                        configured_product: "monthly",
+                        apple_offer_reference: "recipient-monthly",
+                        status: "presented",
+                        expires_at: "2030-01-01T00:00:00Z",
+                        credit_quantity: 1
+                    };
+                }
+                if (sql.includes("SELECT encrypted_code FROM offer_code_inventory")) {
+                    assert.equal(parameters[0], "reservation-1");
+                    return {encrypted_code: encryptedCode};
+                }
+                return null;
+            }
+        })
+    };
+
+    const first = await activeReservationByID(testEnv(database), "account-1", "reservation-1");
+    const second = await activeReservationByID(testEnv(database), "account-1", "reservation-1");
+    assert.equal(first.offerCode, "SAME-OFFER-CODE");
+    assert.equal(second.offerCode, first.offerCode);
 });
 
 test("failed webhook events are reacquired, processed events deduplicate, and payload drift is rejected", async () => {
@@ -216,6 +334,41 @@ test("RevenueCat dashboard test events are acknowledged without customer lookup"
         event({type: "TEST", app_user_id: "dashboard-test-customer"}),
         "2026-07-14T00:00:00Z"
     );
+});
+
+test("promotional offer redemption matches RevenueCat discount identifier", async () => {
+    const database = new EventProcessingDatabase({
+        purchase: true,
+        fulfillmentType: "promotional_offer",
+        configuredProduct: "yearly",
+        offerReference: "sender-yearly-1",
+        referralID: null
+    });
+    await processRevenueCatEvent(
+        testEnv(database),
+        event({
+            type: "RENEWAL",
+            product_id: "example_pro_yearly",
+            offer_code: undefined,
+            discount_identifier: "sender-yearly-1",
+            presented_offering_id: "default"
+        }),
+        "2026-07-14T00:00:00Z"
+    );
+    assert.equal(database.confirmedRedemptionCount, 1);
+});
+
+test("an unrelated purchase does not consume an active redemption", async () => {
+    const database = new EventProcessingDatabase({purchase: true});
+    await assert.rejects(
+        processRevenueCatEvent(
+            testEnv(database),
+            event({offer_code: "unrelated-offer"}),
+            "2026-07-14T00:00:00Z"
+        ),
+        (error: unknown) => error instanceof HTTPError && error.code === "redemption_event_mismatch"
+    );
+    assert.equal(database.confirmedRedemptionCount, 0);
 });
 
 test("unsubscribe and billing errors preserve credit while support refunds reverse conditionally", async () => {
@@ -354,6 +507,16 @@ test("lost response recovery persists an encrypted fulfillment and rejects opera
     assert.deepEqual(await retry.json(), firstValue);
     assert.equal(database.reservationReadCount, 1);
 
+    const retryWithNewOperation = await route(await signedClaimRequest(
+        keyPair.privateKey,
+        "operation-retry-after-app-store-back-2",
+        "request-nonce-retry-after-back-0003",
+        "DEMO-2345-6789-ABCD"
+    ), env);
+    assert.equal(retryWithNewOperation.status, 201);
+    assert.deepEqual(await retryWithNewOperation.json(), firstValue);
+    assert.equal(database.pendingReservationReadCount, 1);
+
     await assert.rejects(
         route(await signedClaimRequest(
             keyPair.privateKey,
@@ -363,6 +526,31 @@ test("lost response recovery persists an encrypted fulfillment and rejects opera
         ), env),
         (error: unknown) => error instanceof HTTPError && error.code === "idempotency_key_reused"
     );
+});
+
+test("device revocation is self-only at the public route", async () => {
+    const keyPair = await crypto.subtle.generateKey(
+        {name: "ECDSA", namedCurve: "P-256"},
+        true,
+        ["sign", "verify"]
+    );
+    const publicKey = Buffer.from(await crypto.subtle.exportKey("raw", keyPair.publicKey)).toString("base64");
+    const env = testEnv(new RouteRecoveryDatabase(publicKey));
+
+    await assert.rejects(
+        route(await signedDeviceRevocationRequest(
+            keyPair.privateKey,
+            {deviceID: "another-device"},
+            "request-nonce-device-target-0001"
+        ), env),
+        (error: unknown) => error instanceof HTTPError && error.code === "device_target_not_supported"
+    );
+    const response = await route(await signedDeviceRevocationRequest(
+        keyPair.privateKey,
+        {},
+        "request-nonce-device-self-0002"
+    ), env);
+    assert.equal(response.status, 200);
 });
 
 type WebhookRow = {payload_hash: string; processing_status: string; processed_at: string | null};
@@ -462,12 +650,17 @@ class EventProcessingDatabase {
     earnedInsertCount = 0;
     private reversed = false;
     private restored = false;
+    private adjustmentState: string | null = null;
     private options: {
         earned: boolean;
         purchase: boolean;
         senderLifetime: boolean;
         balance: number;
         recentEarned: number;
+        fulfillmentType: "offer_code" | "promotional_offer";
+        configuredProduct: "monthly" | "yearly";
+        offerReference: string;
+        referralID: string | null;
     };
 
     constructor(options: Partial<EventProcessingDatabase["options"]> = {}) {
@@ -477,21 +670,31 @@ class EventProcessingDatabase {
             senderLifetime: false,
             balance: 0,
             recentEarned: 0,
+            fulfillmentType: "offer_code",
+            configuredProduct: "monthly",
+            offerReference: "recipient-monthly",
+            referralID: "referral-1",
             ...options
         };
     }
 
     prepare(sql: string) {
         return new TestStatement(sql, {
-            all: async () => ({results: sql.includes("FROM referral_accounts") ? [{id: "recipient-account"}] : []}),
-            first: async () => {
-                if (sql.includes("SELECT * FROM redemptions")) {
-                    return this.options.purchase ? {
+            all: async () => {
+                if (sql.includes("SELECT DISTINCT r.* FROM redemptions")) {
+                    return {results: this.options.purchase ? [{
                         id: "redemption-1",
-                        configured_product: "monthly",
-                        apple_offer_reference: "recipient-monthly",
-                        referral_id: "referral-1"
-                    } : null;
+                        fulfillment_type: this.options.fulfillmentType,
+                        configured_product: this.options.configuredProduct,
+                        apple_offer_reference: this.options.offerReference,
+                        referral_id: this.options.referralID
+                    }] : []};
+                }
+                return {results: sql.includes("FROM referral_accounts") ? [{id: "recipient-account"}] : []};
+            },
+            first: async () => {
+                if (sql.includes("SELECT state FROM transaction_adjustments")) {
+                    return this.adjustmentState ? {state: this.adjustmentState} : null;
                 }
                 if (sql.includes("JOIN referral_accounts")) {
                     return {
@@ -512,7 +715,11 @@ class EventProcessingDatabase {
                 }
                 return null;
             },
-            run: async () => {
+            run: async parameters => {
+                if (sql.includes("INSERT INTO transaction_adjustments")) {
+                    this.adjustmentState = String(parameters[1]);
+                    return result(1);
+                }
                 if (sql.includes("entry_type,quantity") && sql.includes("SELECT ?,?,?,?,-1")) {
                     this.reversalInsertAttempts += 1;
                     if (this.options.earned && !this.reversed) {
@@ -553,8 +760,8 @@ class RouteRecoveryDatabase {
     inventoryCiphertext = "";
     persistedResponse: string | undefined;
     reservationReadCount = 0;
-    private requestHash: string | undefined;
-    private responseStatus = 201;
+    pendingReservationReadCount = 0;
+    private idempotencyResponses = new Map<string, {requestHash: string; status: number; response: string}>();
 
     constructor(private publicKey: string) {}
 
@@ -566,19 +773,25 @@ class RouteRecoveryDatabase {
                 }
                 return {results: []};
             },
-            first: async () => {
+            first: async parameters => {
                 if (sql.includes("SELECT revenuecat_customer_id FROM referral_accounts")) {
                     return {revenuecat_customer_id: "recipient-rc-id"};
                 }
                 if (sql.includes("SELECT request_hash,status,response_json FROM idempotency_responses")) {
-                    return this.persistedResponse ? {
-                        request_hash: this.requestHash,
-                        status: this.responseStatus,
-                        response_json: this.persistedResponse
+                    const response = this.idempotencyResponses.get(String(parameters[1]));
+                    return response ? {
+                        request_hash: response.requestHash,
+                        status: response.status,
+                        response_json: response.response
                     } : null;
                 }
                 if (sql.includes("FROM redemptions r LEFT JOIN credit_ledger")) {
-                    this.reservationReadCount += 1;
+                    if (sql.includes("r.status IN ('reserved','presented')")) {
+                        this.pendingReservationReadCount += 1;
+                    } else {
+                        this.reservationReadCount += 1;
+                        if (parameters[1] !== "operation-recovery-1") return null;
+                    }
                     return {
                         id: "reservation-recovered",
                         fulfillment_type: "offer_code",
@@ -596,9 +809,13 @@ class RouteRecoveryDatabase {
             },
             run: async (parameters) => {
                 if (sql.includes("INSERT OR IGNORE INTO idempotency_responses")) {
-                    this.requestHash = String(parameters[2]);
-                    this.responseStatus = Number(parameters[3]);
-                    this.persistedResponse = String(parameters[4]);
+                    const response = String(parameters[4]);
+                    this.persistedResponse = response;
+                    this.idempotencyResponses.set(String(parameters[1]), {
+                        requestHash: String(parameters[2]),
+                        status: Number(parameters[3]),
+                        response
+                    });
                 }
                 return result(1);
             }
@@ -626,6 +843,33 @@ async function signedClaimRequest(
         headers: {
             "Content-Type": "application/json",
             "Idempotency-Key": operationID,
+            "X-Demo-Identity": "recipient-rc-id",
+            "X-Demo-Timestamp": timestamp,
+            "X-Demo-Nonce": nonce,
+            "X-Demo-Signature": Buffer.from(signature).toString("base64")
+        },
+        body
+    });
+}
+
+async function signedDeviceRevocationRequest(
+    privateKey: CryptoKey,
+    value: Record<string, string>,
+    nonce: string
+): Promise<Request> {
+    const url = "https://staging.example.com/v1/devices/revoke";
+    const body = JSON.stringify(value);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const canonical = ["POST", "/v1/devices/revoke", await sha256(body), timestamp, nonce].join("\n");
+    const signature = await crypto.subtle.sign(
+        {name: "ECDSA", hash: "SHA-256"},
+        privateKey,
+        new TextEncoder().encode(canonical)
+    );
+    return new Request(url, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
             "X-Demo-Identity": "recipient-rc-id",
             "X-Demo-Timestamp": timestamp,
             "X-Demo-Nonce": nonce,
