@@ -58,6 +58,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--environment", choices=("staging", "production"), required=True)
+    parser.add_argument(
+        "--allow-production-enrollment",
+        action="store_true",
+        help="accept production CONFIG_JSON.enabled=true for the guarded promotion command only",
+    )
     return parser.parse_args()
 
 
@@ -113,7 +118,12 @@ def https_url(value: Any, *, origin_only: bool) -> bool:
     return not origin_only or parsed.path in ("", "/")
 
 
-def validate(configuration: dict[str, Any], environment: str) -> list[str]:
+def validate(
+    configuration: dict[str, Any],
+    environment: str,
+    *,
+    allow_production_enrollment: bool = False,
+) -> list[str]:
     errors: list[str] = []
     try:
         variables, databases = environment_values(configuration, environment)
@@ -196,8 +206,14 @@ def validate(configuration: dict[str, Any], environment: str) -> list[str]:
                 errors.append(f"{environment} CONFIG_JSON is missing {key}")
         if referral_config.get("schemaVersion") != 1:
             errors.append(f"{environment} CONFIG_JSON.schemaVersion must equal 1")
-        if environment == "production" and referral_config.get("enabled") is not False:
-            errors.append("production CONFIG_JSON.enabled must be false for disabled-first deployment")
+        if environment == "production":
+            if allow_production_enrollment:
+                if referral_config.get("enabled") is not True:
+                    errors.append(
+                        "production CONFIG_JSON.enabled must be true for enrollment promotion"
+                    )
+            elif referral_config.get("enabled") is not False:
+                errors.append("production CONFIG_JSON.enabled must be false for disabled-first deployment")
         if referral_config.get("redemptionEnabled") is not True:
             errors.append(f"{environment} CONFIG_JSON.redemptionEnabled must be true")
 
@@ -211,7 +227,11 @@ def main() -> int:
     except (OSError, tomllib.TOMLDecodeError) as error:
         print(f"unable to read Worker configuration: {error}", file=sys.stderr)
         return 2
-    errors = validate(configuration, arguments.environment)
+    errors = validate(
+        configuration,
+        arguments.environment,
+        allow_production_enrollment=arguments.allow_production_enrollment,
+    )
     if errors:
         print("ReferralKit Worker deployment configuration is not valid:", file=sys.stderr)
         for error in errors:

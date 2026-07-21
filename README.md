@@ -156,7 +156,9 @@ To configure it:
 5. Deploy staging and connect a RevenueCat sandbox webhook to `/v1/revenuecat/webhooks`.
 6. Import a batch of App Store offer codes and complete a sandbox referral end to end.
 
-The Worker starts with enrollment and redemption disabled. Turn them on independently through `CONFIG_JSON` when each environment is ready.
+The Worker starts with enrollment and redemption disabled. Use the guarded
+production promotion command in [Worker/README.md](Worker/README.md) only after
+the disabled Worker reports that its code inventory is enrollment-ready.
 
 See [Worker/README.md](Worker/README.md) for secrets, migration commands, offer-code imports, webhook setup, and rollout guidance.
 

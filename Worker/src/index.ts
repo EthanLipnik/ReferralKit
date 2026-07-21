@@ -392,6 +392,32 @@ export async function resolveWebhookAccount(env: Env, event: RCEvent): Promise<{
     return {id: [...accountIDs][0]};
 }
 
+async function webhookEventTouchesReferralState(env: Env, event: RCEvent): Promise<boolean> {
+    const referralOfferIdentifiers = new Set(normalizedIdentityCandidates([
+        env.RECIPIENT_MONTHLY_OFFER_REFERENCE_NAME,
+        env.RECIPIENT_YEARLY_OFFER_REFERENCE_NAME,
+        env.SENDER_NEW_MONTHLY_OFFER_REFERENCE_NAME,
+        env.SENDER_NEW_YEARLY_OFFER_REFERENCE_NAME,
+        env.SENDER_MONTHLY_PROMOTIONAL_OFFER_ID,
+        env.SENDER_YEARLY_PROMOTIONAL_OFFER_ID,
+        env.SENDER_MONTHLY_PROMOTIONAL_OFFER_2_MONTHS_ID,
+        env.SENDER_YEARLY_PROMOTIONAL_OFFER_2_MONTHS_ID,
+        env.SENDER_MONTHLY_PROMOTIONAL_OFFER_3_MONTHS_ID,
+        env.SENDER_YEARLY_PROMOTIONAL_OFFER_3_MONTHS_ID,
+        env.SENDER_MONTHLY_PROMOTIONAL_OFFER_6_MONTHS_ID,
+        env.SENDER_YEARLY_PROMOTIONAL_OFFER_6_MONTHS_ID,
+        env.SENDER_MONTHLY_PROMOTIONAL_OFFER_12_MONTHS_ID,
+        env.SENDER_YEARLY_PROMOTIONAL_OFFER_12_MONTHS_ID
+    ]));
+    if ([event.offer_code, event.discount_identifier]
+        .some(identifier => identifier && referralOfferIdentifiers.has(identifier))) return true;
+    if (!event.transaction_id) return false;
+    const redemption = await env.DB.prepare(
+        "SELECT 1 present FROM redemptions WHERE revenuecat_transaction_id=? LIMIT 1"
+    ).bind(event.transaction_id).first<{present: number}>();
+    return Boolean(redemption);
+}
+
 type WebhookClaim = {state: "acquired"; token: string} | {state: "processed"} | {state: "busy"};
 
 function processingStartedAt(value: string | null | undefined): number {
@@ -450,9 +476,24 @@ async function updateSenderLifetimeStatus(env: Env, sender: {id: string; revenue
     return state.lifetime;
 }
 
-export async function processRevenueCatEvent(env: Env, event: RCEvent, receivedAt: string): Promise<void> {
-    if (event.type === "TEST") return;
-    const account = await resolveWebhookAccount(env, event);
+type RevenueCatEventProcessingResult = "processed" | "test_event" | "unregistered_customer";
+
+export async function processRevenueCatEvent(
+    env: Env,
+    event: RCEvent,
+    receivedAt: string
+): Promise<RevenueCatEventProcessingResult> {
+    if (event.type === "TEST") return "test_event";
+    let account: {id: string};
+    try {
+        account = await resolveWebhookAccount(env, event);
+    } catch (error) {
+        if (error instanceof HTTPError && error.code === "unknown_customer" &&
+            !await webhookEventTouchesReferralState(env, event)) {
+            return "unregistered_customer";
+        }
+        throw error;
+    }
     const occurredAt = transactionOccurredAt(event, receivedAt);
     const adjustmentOccurredAt = typeof event.event_timestamp_ms === "number" &&
         Number.isFinite(event.event_timestamp_ms) && event.event_timestamp_ms > 0
@@ -554,7 +595,7 @@ export async function processRevenueCatEvent(env: Env, event: RCEvent, receivedA
             "SELECT state FROM transaction_adjustments WHERE transaction_id=?"
         ).bind(event.transaction_id).first<{state: string}>();
         if ((isRefund && currentAdjustment?.state !== "refunded") ||
-            (refundWasReversed && currentAdjustment?.state !== "active")) return;
+            (refundWasReversed && currentAdjustment?.state !== "active")) return "processed";
         const redemption = await env.DB.prepare(
             "SELECT id,referral_id FROM redemptions WHERE revenuecat_transaction_id=?"
         ).bind(event.transaction_id).first<{id: string; referral_id: string | null}>();
@@ -615,6 +656,7 @@ export async function processRevenueCatEvent(env: Env, event: RCEvent, receivedA
             }
         }
     }
+    return "processed";
 }
 
 export async function webhook(request: Request, env: Env) {
@@ -640,11 +682,13 @@ export async function webhook(request: Request, env: Env) {
     if (claim.state === "processed") return json({ok: true, duplicate: true});
     if (claim.state === "busy") throw new HTTPError(503, "webhook_processing");
     try {
-        await processRevenueCatEvent(env, event, receivedAt);
+        const processingResult = await processRevenueCatEvent(env, event, receivedAt);
         await env.DB.prepare(
             "UPDATE webhook_events SET processing_status='processed',processed_at=? WHERE provider_event_id=? AND processing_status='processing' AND processed_at=?"
         ).bind(now(), event.id, claim.token).run();
-        return json({ok: true});
+        return processingResult === "processed"
+            ? json({ok: true})
+            : json({ok: true, ignored: true, reason: processingResult});
     } catch (error) {
         if (error instanceof HTTPError) {
             console.error("RevenueCat webhook processing failed", {

@@ -56,6 +56,31 @@ class WorkerConfigValidationTests(unittest.TestCase):
         errors = MODULE.validate(config, "production")
         self.assertIn("production CONFIG_JSON.enabled must be false for disabled-first deployment", errors)
 
+    def test_production_promotion_requires_explicit_validation_mode(self):
+        config = self.config("production")
+        config["vars"]["CONFIG_JSON"] = json.dumps({
+            "schemaVersion": 1,
+            "enabled": True,
+            "redemptionEnabled": True,
+            "maxCreditsPerRedemption": 12,
+            "extensionWindowDays": 7,
+        })
+        self.assertEqual(
+            MODULE.validate(config, "production", allow_production_enrollment=True),
+            [],
+        )
+
+    def test_production_promotion_rejects_disabled_config(self):
+        errors = MODULE.validate(
+            self.config("production"),
+            "production",
+            allow_production_enrollment=True,
+        )
+        self.assertIn(
+            "production CONFIG_JSON.enabled must be true for enrollment promotion",
+            errors,
+        )
+
     def test_missing_sender_reference_name_is_rejected(self):
         config = self.config("staging")
         del config["env"]["staging"]["vars"]["SENDER_NEW_YEARLY_OFFER_REFERENCE_NAME"]

@@ -271,6 +271,48 @@ test("webhook account resolution accepts aliases and rejects ambiguous identity 
         {id: "account-3"}
     );
     assert(originalIdentity.directParameters.includes("original-recipient-id"));
+
+    assert.equal(
+        await processRevenueCatEvent(
+            testEnv(new AccountResolutionDatabase([], [])),
+            event({
+                type: "BILLING_ISSUE",
+                app_user_id: "unregistered-customer",
+                transaction_id: undefined,
+                offer_code: undefined
+            }),
+            "2026-07-14T00:00:00Z"
+        ),
+        "unregistered_customer"
+    );
+    await assert.rejects(
+        processRevenueCatEvent(
+            testEnv(new AccountResolutionDatabase([{id: "account-1"}], [{id: "account-2"}])),
+            event({type: "BILLING_ISSUE", aliases: ["other-family"]}),
+            "2026-07-14T00:00:00Z"
+        ),
+        (error: unknown) => error instanceof HTTPError && error.code === "ambiguous_customer_identity"
+    );
+    await assert.rejects(
+        processRevenueCatEvent(
+            testEnv(new AccountResolutionDatabase([], [])),
+            event({app_user_id: "unregistered-customer"}),
+            "2026-07-14T00:00:00Z"
+        ),
+        (error: unknown) => error instanceof HTTPError && error.code === "unknown_customer"
+    );
+    await assert.rejects(
+        processRevenueCatEvent(
+            testEnv(new AccountResolutionDatabase([], [], true)),
+            event({
+                type: "REFUND",
+                app_user_id: "rotated-customer",
+                offer_code: undefined
+            }),
+            "2026-07-14T00:00:00Z"
+        ),
+        (error: unknown) => error instanceof HTTPError && error.code === "unknown_customer"
+    );
 });
 
 test("registration adopts one alias family and rejects ambiguity before writing", async () => {
@@ -329,11 +371,44 @@ test("RevenueCat dashboard test events are acknowledged without customer lookup"
             throw new Error("TEST events must not query customer state");
         }
     };
-    await processRevenueCatEvent(
-        testEnv(database),
-        event({type: "TEST", app_user_id: "dashboard-test-customer"}),
-        "2026-07-14T00:00:00Z"
+    assert.equal(
+        await processRevenueCatEvent(
+            testEnv(database),
+            event({type: "TEST", app_user_id: "dashboard-test-customer"}),
+            "2026-07-14T00:00:00Z"
+        ),
+        "test_event"
     );
+});
+
+test("authenticated unregistered RevenueCat customers are acknowledged as ignored", async () => {
+    const raw = JSON.stringify({event: event({
+        id: "unregistered-event",
+        type: "BILLING_ISSUE",
+        app_user_id: "unregistered-customer",
+        transaction_id: undefined,
+        offer_code: undefined
+    })});
+    const timestamp = Math.floor(Date.now() / 1_000).toString();
+    const signature = await hmac("test-signing-secret", `${timestamp}.${raw}`);
+    const database = new UnregisteredWebhookDatabase();
+    const response = await route(new Request("https://staging.example.com/v1/revenuecat/webhooks", {
+        method: "POST",
+        headers: {
+            authorization: "Bearer test-webhook-secret",
+            "content-type": "application/json",
+            "x-revenuecat-webhook-signature": `t=${timestamp},v1=${signature}`
+        },
+        body: raw
+    }), testEnv(database));
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+        ok: true,
+        ignored: true,
+        reason: "unregistered_customer"
+    });
+    assert.equal(database.processedUpdates, 1);
 });
 
 test("promotional offer redemption matches RevenueCat discount identifier", async () => {
@@ -344,7 +419,7 @@ test("promotional offer redemption matches RevenueCat discount identifier", asyn
         offerReference: "sender-yearly-1",
         referralID: null
     });
-    await processRevenueCatEvent(
+    const processingResult = await processRevenueCatEvent(
         testEnv(database),
         event({
             type: "RENEWAL",
@@ -355,6 +430,7 @@ test("promotional offer redemption matches RevenueCat discount identifier", asyn
         }),
         "2026-07-14T00:00:00Z"
     );
+    assert.equal(processingResult, "processed");
     assert.equal(database.confirmedRedemptionCount, 1);
 });
 
@@ -586,10 +662,49 @@ class WebhookClaimDatabase {
     }
 }
 
+class UnregisteredWebhookDatabase {
+    processedUpdates = 0;
+    private row: WebhookRow | null = null;
+
+    prepare(sql: string) {
+        return new TestStatement(sql, {
+            all: async () => ({results: []}),
+            first: async () => {
+                if (sql.includes("SELECT payload_hash")) return this.row;
+                if (sql.includes("SELECT 1 present")) return this.row ? {present: 1} : null;
+                return null;
+            },
+            run: async parameters => {
+                if (sql.includes("INSERT INTO webhook_events")) {
+                    this.row = {
+                        payload_hash: String(parameters[3]),
+                        processing_status: "processing",
+                        processed_at: String(parameters[6])
+                    };
+                    return result(1);
+                }
+                if (sql.includes("SET processing_status='processed'")) {
+                    this.processedUpdates += 1;
+                    if (this.row) {
+                        this.row.processing_status = "processed";
+                        this.row.processed_at = String(parameters[0]);
+                    }
+                    return result(1);
+                }
+                return result(0);
+            }
+        });
+    }
+}
+
 class AccountResolutionDatabase {
     directParameters: unknown[] = [];
 
-    constructor(private direct: Array<{id: string}>, private aliases: Array<{id: string}>) {}
+    constructor(
+        private direct: Array<{id: string}>,
+        private aliases: Array<{id: string}>,
+        private knownTransaction = false
+    ) {}
 
     prepare(sql: string) {
         return new TestStatement(sql, {
@@ -599,7 +714,10 @@ class AccountResolutionDatabase {
                     return {results: this.direct};
                 }
                 return {results: this.aliases};
-            }
+            },
+            first: async () => sql.includes("FROM redemptions") && this.knownTransaction
+                ? {present: 1}
+                : null
         });
     }
 }

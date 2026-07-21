@@ -59,13 +59,25 @@ bash Scripts/deploy-worker.sh staging \
 The deploy command runs the Worker tests and build, verifies all seven deployed
 secret names (including RevenueCat HMAC signing), applies the matching D1
 migrations, deploys that environment, and verifies `/health`. Production is
-always rejected unless `CONFIG_JSON.enabled` is `false`; enable enrollment only
-after a separate canary.
+always rejected unless `CONFIG_JSON.enabled` is `false`.
 
-After inventory is loaded, repeat the production deploy verification with
-`--require-enrollment-ready`. This keeps the initial disabled-first deployment
-possible while making the final canary fail unless `/health` confirms correctly
-partitioned inventory for every configured recipient and new-sender offer.
+After inventory is loaded, promote enrollment with the single explicit command:
+
+```sh
+bash Scripts/deploy-worker.sh production \
+  --config /secure/path/product-wrangler-enrollment-enabled.toml \
+  --base-url https://referrals.example.com \
+  --enable-production-enrollment \
+  --confirm-production-enrollment
+```
+
+That command requires `CONFIG_JSON.enabled` to be `true`, verifies the live
+disabled Worker is already enrollment-ready before deployment, skips migrations,
+then verifies the enabled deployment. If that final health check fails, it
+immediately redeploys a temporary copy with enrollment disabled and exits with
+an error. The promotion manifest must be the normal product manifest with only
+`CONFIG_JSON.enabled` changed to `true`; never use this path for code or schema
+changes.
 
 ## Configuration notes
 
