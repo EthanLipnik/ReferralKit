@@ -42,6 +42,10 @@ SENDER_NEW_MONTHLY_OFFER_REFERENCE_NAME = "REPLACE_WITH_APP_STORE_CONNECT_REFERE
 SENDER_NEW_YEARLY_OFFER_REFERENCE_NAME = "REPLACE_WITH_APP_STORE_CONNECT_REFERENCE_NAME"
 CONFIG_JSON = '{"schemaVersion":1,"enabled":false,"redemptionEnabled":false,"renewalProduct":"monthly","senderCreditDays":30,"recipientFreeDays":30,"maxBankedCredits":24,"maxCreditsPerRedemption":12,"extensionWindowDays":7,"maxRewardedReferralsPerRolling30Days":10,"maxOutstandingClaims":20,"reservationMinutes":30,"hidePolicy":"proOnly","copyVariant":"giftMonthV1","localizedCopy":{"en":{"headline":"Give a month. Get a month.","body":"Invite someone. When they redeem their free month, you will earn one too."}}}'
 
+[[routes]]
+pattern = "example.com"
+custom_domain = true
+
 [[d1_databases]]
 binding = "DB"
 database_name = "referralkit"
@@ -90,6 +94,10 @@ SENDER_NEW_YEARLY_OFFER_ID = "REPLACE_WITH_OFFER_REFERENCE"
 SENDER_NEW_MONTHLY_OFFER_REFERENCE_NAME = "REPLACE_WITH_APP_STORE_CONNECT_REFERENCE_NAME"
 SENDER_NEW_YEARLY_OFFER_REFERENCE_NAME = "REPLACE_WITH_APP_STORE_CONNECT_REFERENCE_NAME"
 CONFIG_JSON = '{"schemaVersion":1,"enabled":false,"redemptionEnabled":false,"renewalProduct":"monthly","senderCreditDays":30,"recipientFreeDays":30,"maxBankedCredits":24,"maxCreditsPerRedemption":12,"extensionWindowDays":7,"maxRewardedReferralsPerRolling30Days":10,"maxOutstandingClaims":20,"reservationMinutes":30,"hidePolicy":"proOnly","copyVariant":"giftMonthV1","localizedCopy":{"en":{"headline":"Give a month. Get a month.","body":"Invite someone. When they redeem their free month, you will earn one too."}}}'
+
+[[env.staging.routes]]
+pattern = "staging.example.com"
+custom_domain = true
 
 [[env.staging.d1_databases]]
 binding = "DB"

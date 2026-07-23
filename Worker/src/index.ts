@@ -5,7 +5,8 @@ import {decryptOfferCode, encryptOfferCode, hmac, randomID, sha256} from "./cryp
 import {RCEvent, acceptsTransactionEnvironment, customerState, parseEvent, transactionOccurredAt} from "./revenuecat";
 import {accountBalance, activeReservationByID, claim, createCode, existingCode, now, pendingReservationForAccount, redemptionStatus, referralHistory, rejectRecipientOfferCodeAsIneligible, releaseExpired, reservationForOperation, reserve} from "./domain";
 import {importOfferCodes, offerCodeProductMappings, redeemOfferCode} from "./inventory";
-import {landing} from "./landing";
+import {landing, unavailableLanding} from "./landing";
+import type {PublicResponseContext} from "./landing";
 
 const webhookProcessingLeaseMilliseconds = 5 * 60_000;
 const webhookSignatureToleranceMilliseconds = 5 * 60_000;
@@ -256,16 +257,34 @@ async function health(env: Env): Promise<Response> {
     }, ok ? 200 : 503);
 }
 
-function appleAppSiteAssociation(env: Env): Response {
-    const appIDs = env.ASSOCIATED_APP_IDS.split(",").map(value => value.trim()).filter(Boolean);
-    return new Response(JSON.stringify({
+export async function appleAppSiteAssociation(request: Request, env: Env): Promise<Response> {
+    const appIDs = [...new Set(
+        env.ASSOCIATED_APP_IDS.split(",").map(value => value.trim()).filter(Boolean)
+    )];
+    const body = JSON.stringify({
         applinks: {
             details: [{appIDs, components: [{"/": "/r/*", comment: "Referral links"}]}]
         }
-    }), {
+    });
+    // A content-derived validator lets Apple and intermediary caches revalidate
+    // this configuration without downloading a body or touching D1.
+    const etag = `"${await sha256(body)}"`;
+    const cacheControl = "public,max-age=3600,s-maxage=86400,stale-if-error=86400";
+    const headers = {
+        "cache-control": cacheControl,
+        "cdn-cache-control": cacheControl,
+        "content-type": "application/json",
+        "etag": etag,
+        "x-content-type-options": "nosniff",
+    };
+    const ifNoneMatch = request.headers.get("if-none-match");
+    if (ifNoneMatch?.split(",").map(value => value.trim()).some(value => value === etag || value === "*")) {
+        return new Response(null, {status: 304, headers});
+    }
+    return new Response(request.method === "HEAD" ? null : body, {
         headers: {
-            "content-type": "application/json",
-            "cache-control": "public, max-age=3600"
+            ...headers,
+            "content-length": String(new TextEncoder().encode(body).byteLength),
         }
     });
 }
@@ -790,15 +809,27 @@ async function persistIdempotencyResponse(
     if (!cached) throw new HTTPError(503, "idempotency_response_unavailable");
 }
 
-export async function route(request: Request, env: Env): Promise<Response> {
+export async function route(
+    request: Request,
+    env: Env,
+    publicResponseContext: PublicResponseContext = {},
+): Promise<Response> {
     const path = new URL(request.url).pathname;
-    if (request.method === "GET" && path === "/.well-known/apple-app-site-association") {
-        return appleAppSiteAssociation(env);
+    if ((request.method === "GET" || request.method === "HEAD") &&
+        path === "/.well-known/apple-app-site-association") {
+        return appleAppSiteAssociation(request, env);
     }
     if (request.method === "GET" && path === "/health") return health(env);
     if (request.method === "GET" && path === "/v1/config") return configResponse(request, env);
     if (request.method === "GET" && path.startsWith("/r/")) {
-        return landing(request, env, decodeURIComponent(path.slice(3)));
+        let code: string;
+        try {
+            code = decodeURIComponent(path.slice(3));
+        } catch {
+            // Malformed percent encoding is a bad public link, not a server failure.
+            return unavailableLanding(env);
+        }
+        return landing(request, env, code, publicResponseContext);
     }
     if (request.method === "POST" && path === "/v1/devices/registration-challenges") {
         return registrationChallenge(request, env);
@@ -929,8 +960,28 @@ export async function route(request: Request, env: Env): Promise<Response> {
 }
 
 export default {
-    async fetch(request: Request, env: Env) {
-        try { return await route(request, env); }
+    async fetch(request: Request, env: Env, context: ExecutionContext) {
+        try {
+            const path = new URL(request.url).pathname;
+            // Only public referral pages need the named edge cache; API traffic
+            // avoids an unnecessary cache lookup and remains no-store.
+            let publicCache: Cache | undefined;
+            if (request.method === "GET" && path.startsWith("/r/")) {
+                try {
+                    publicCache = await caches.open("referralkit-public-v1");
+                } catch (error) {
+                    // Cache availability depends on Worker routing and must not turn
+                    // a recoverable public link into an internal server error.
+                    console.warn("Referral landing cache unavailable", {
+                        error: error instanceof Error ? error.message : "unknown_error",
+                    });
+                }
+            }
+            return await route(request, env, {
+                cache: publicCache,
+                waitUntil: promise => context.waitUntil(promise),
+            });
+        }
         catch (error) {
             if (error instanceof HTTPError) {
                 return json({error: {code: error.code, message: error.message}}, error.status);
@@ -951,4 +1002,4 @@ export default {
         await env.DB.prepare("DELETE FROM transaction_adjustments WHERE updated_at<=?")
             .bind(new Date(Date.now() - 400 * 86400_000).toISOString()).run();
     }
-};
+} satisfies ExportedHandler<Env>;

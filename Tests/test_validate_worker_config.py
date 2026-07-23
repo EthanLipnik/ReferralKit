@@ -40,9 +40,14 @@ class WorkerConfigValidationTests(unittest.TestCase):
     def config(self, environment: str) -> dict:
         vars = self.base_vars(environment)
         database = [{"database_name": "referrals", "database_id": "49cb74db-bc3f-4f91-b242-af84d7f07b24"}]
+        routes = [{"pattern": "mirage.elipnik.com", "custom_domain": True}]
         if environment == "staging":
-            return {"env": {"staging": {"vars": vars, "d1_databases": database}}}
-        return {"vars": vars, "d1_databases": database}
+            return {"env": {"staging": {
+                "vars": vars,
+                "d1_databases": database,
+                "routes": routes,
+            }}}
+        return {"vars": vars, "d1_databases": database, "routes": routes}
 
     def test_production_requires_disabled_enrollment(self):
         config = self.config("production")
@@ -130,6 +135,38 @@ class WorkerConfigValidationTests(unittest.TestCase):
             "staging offer-code resource IDs cannot be shared across monthly and yearly products",
             errors,
         )
+
+    def test_public_site_requires_a_matching_referral_route(self):
+        config = self.config("production")
+        config["routes"] = [{
+            "pattern": "referrals.mirage.elipnik.com",
+            "custom_domain": True,
+        }]
+
+        errors = MODULE.validate(config, "production")
+
+        self.assertIn(
+            "production routes must send PUBLIC_SITE_URL /r/* links to this Worker",
+            errors,
+        )
+
+    def test_public_site_accepts_a_path_route_for_an_externally_hosted_aasa(self):
+        config = self.config("production")
+        config["routes"] = [{
+            "pattern": "mirage.elipnik.com/r/*",
+            "zone_name": "elipnik.com",
+        }]
+
+        self.assertEqual(MODULE.validate(config, "production"), [])
+
+    def test_staging_custom_domain_covers_referral_links_and_worker_aasa(self):
+        config = self.config("staging")
+        config["env"]["staging"]["routes"] = [{
+            "pattern": "mirage.elipnik.com",
+            "custom_domain": True,
+        }]
+
+        self.assertEqual(MODULE.validate(config, "staging"), [])
 
 
 if __name__ == "__main__":

@@ -84,6 +84,7 @@ changes.
 - `CODE_PREFIX` is the visible prefix before three groups of four random characters.
 - `AUTH_HEADER_PREFIX` must match the Swift client's configured `X-<prefix>-Identity`, timestamp, nonce, and signature headers.
 - `ASSOCIATED_APP_IDS` is a comma-separated list of Apple App Site Association IDs served from `/.well-known/apple-app-site-association`. Include the exact App Store or TestFlight application identifier for each app that should open referral links on this Worker host.
+- Keep `/.well-known/apple-app-site-association` unauthenticated and exempt from rate limiting, bot challenges, and redirects. Apple fetches this file independently of referral traffic and may cache a failed response. If `PUBLIC_SITE_URL` routes only `/r/*` to this Worker, its other origin must serve the same association payload.
 - `REGISTRATION_ATTRIBUTE_KEY` is written to the current RevenueCat subscriber during device binding.
 - `LIFETIME_PRODUCT_IDS` is a comma-separated exact list. Lifetime status is never inferred from a product name.
 - `RECIPIENT_*_OFFER_ID` is the App Store Connect resource ID used to partition imported code inventory. `RECIPIENT_*_OFFER_REFERENCE_NAME` is the offer's exact reference name from App Store Connect, which RevenueCat sends in webhook `offer_code` fields. Do not put the resource ID in both settings.

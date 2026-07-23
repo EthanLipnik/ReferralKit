@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from fnmatch import fnmatchcase
 import json
 from pathlib import Path
 import re
@@ -67,18 +68,43 @@ def parse_args() -> argparse.Namespace:
 
 
 def environment_values(configuration: dict[str, Any], environment: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    if environment == "production":
-        variables = configuration.get("vars")
-        databases = configuration.get("d1_databases")
-    else:
-        staging = configuration.get("env", {}).get("staging", {})
-        variables = staging.get("vars")
-        databases = staging.get("d1_databases")
+    deployment = environment_deployment(configuration, environment)
+    variables = deployment.get("vars")
+    databases = deployment.get("d1_databases")
     if not isinstance(variables, dict):
         raise ValueError(f"missing {environment} vars table")
     if not isinstance(databases, list):
         raise ValueError(f"missing {environment} d1_databases table")
     return variables, databases
+
+
+def environment_deployment(configuration: dict[str, Any], environment: str) -> dict[str, Any]:
+    if environment == "production":
+        return configuration
+    staging = configuration.get("env", {}).get("staging", {})
+    return staging if isinstance(staging, dict) else {}
+
+
+def public_referral_route_present(
+    configuration: dict[str, Any],
+    environment: str,
+    hostname: str,
+) -> bool:
+    routes = environment_deployment(configuration, environment).get("routes")
+    if not isinstance(routes, list):
+        return False
+    required_route = f"{hostname.lower()}/r/*"
+    for route in routes:
+        if not isinstance(route, dict) or not isinstance(route.get("pattern"), str):
+            continue
+        pattern = route["pattern"].strip().lower()
+        if "://" in pattern:
+            pattern = pattern.split("://", 1)[1]
+        if route.get("custom_domain") is True and pattern.rstrip("/") == hostname.lower():
+            return True
+        if fnmatchcase(required_route, pattern):
+            return True
+    return False
 
 
 KNOWN_TEMPLATE_VALUES = {
@@ -148,6 +174,13 @@ def validate(
     public_site_url = variables.get("PUBLIC_SITE_URL")
     if not https_url(public_site_url, origin_only=True):
         errors.append(f"{environment} PUBLIC_SITE_URL must be an HTTPS origin without a path")
+    else:
+        public_site_hostname = urlparse(public_site_url).hostname
+        if (public_site_hostname and not public_referral_route_present(
+                configuration, environment, public_site_hostname)):
+            errors.append(
+                f"{environment} routes must send PUBLIC_SITE_URL /r/* links to this Worker"
+            )
     app_store_url = variables.get("APP_STORE_URL")
     if (not https_url(app_store_url, origin_only=False) or
             urlparse(str(app_store_url)).hostname != "apps.apple.com" or

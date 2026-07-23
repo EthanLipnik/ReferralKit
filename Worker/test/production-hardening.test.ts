@@ -106,12 +106,17 @@ test("production kill switches block enrollment while allowing earned-credit red
 });
 
 test("staging can serve referral Universal Link association without a redirect", async () => {
+    const request = new Request("https://staging.example.com/.well-known/apple-app-site-association");
     const response = await route(
-        new Request("https://staging.example.com/.well-known/apple-app-site-association"),
+        request,
         testEnv({})
     );
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("content-type"), "application/json");
+    assert.match(response.headers.get("cache-control") || "", /s-maxage=86400/);
+    assert.match(response.headers.get("cache-control") || "", /stale-if-error=86400/);
+    const etag = response.headers.get("etag");
+    assert.ok(etag);
     assert.deepEqual(await response.json(), {
         applinks: {
             details: [{
@@ -120,6 +125,32 @@ test("staging can serve referral Universal Link association without a redirect",
             }]
         }
     });
+
+    const unchanged = await route(
+        new Request(request, {headers: {"if-none-match": etag}}),
+        testEnv({})
+    );
+    assert.equal(unchanged.status, 304);
+    assert.equal(await unchanged.text(), "");
+
+    const head = await route(
+        new Request(request, {method: "HEAD"}),
+        testEnv({})
+    );
+    assert.equal(head.status, 200);
+    assert.ok(Number(head.headers.get("content-length")) > 0);
+    assert.equal(await head.text(), "");
+});
+
+test("malformed referral paths return friendly HTML instead of an internal error", async () => {
+    const response = await route(
+        new Request("https://staging.example.com/r/%"),
+        testEnv({})
+    );
+
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.match(await response.text(), /This referral link isn’t available\./);
 });
 
 test("RevenueCat webhook signatures require a valid fresh HMAC", async () => {
