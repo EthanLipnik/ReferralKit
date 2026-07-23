@@ -3,7 +3,7 @@ import {HTTPError, json, body} from "./http";
 import {authenticate} from "./auth";
 import {decryptOfferCode, encryptOfferCode, hmac, randomID, sha256} from "./crypto";
 import {RCEvent, acceptsTransactionEnvironment, customerState, parseEvent, transactionOccurredAt} from "./revenuecat";
-import {accountBalance, activeReservationByID, claim, createCode, existingCode, now, pendingReservationForAccount, redemptionStatus, referralHistory, releaseExpired, reservationForOperation, reserve} from "./domain";
+import {accountBalance, activeReservationByID, claim, createCode, existingCode, now, pendingReservationForAccount, redemptionStatus, referralHistory, rejectRecipientOfferCodeAsIneligible, releaseExpired, reservationForOperation, reserve} from "./domain";
 import {importOfferCodes, offerCodeProductMappings, redeemOfferCode} from "./inventory";
 import {landing} from "./landing";
 
@@ -514,9 +514,13 @@ export async function processRevenueCatEvent(
     const productIsSupported = [env.MONTHLY_PRODUCT_ID, env.YEARLY_PRODUCT_ID].includes(event.product_id || "");
     if (["INITIAL_PURCHASE", "RENEWAL", "NON_RENEWING_PURCHASE"].includes(event.type) &&
         event.transaction_id && productIsSupported) {
+        // A client can report Apple's ineligibility result, but it cannot be trusted to
+        // suppress a later authoritative purchase webhook and the sender's earned credit.
         const redemptions = await env.DB.prepare(
             "SELECT DISTINCT r.* FROM redemptions r LEFT JOIN offer_code_inventory i ON i.reservation_id=r.id " +
-            "WHERE r.account_id=? AND (r.revenuecat_transaction_id=? OR (r.status IN ('reserved','presented','expired') AND r.reserved_at<=? " +
+            "LEFT JOIN referrals rf ON rf.id=r.referral_id " +
+            "WHERE r.account_id=? AND (r.revenuecat_transaction_id=? OR ((r.status IN ('reserved','presented','expired') " +
+            "OR (r.status='failed' AND rf.status='rejected' AND rf.rejection_reason='apple_offer_ineligible')) AND r.reserved_at<=? " +
             "AND ((r.fulfillment_type='offer_code' AND i.status IN ('assigned','redeemed')) " +
             "OR (r.fulfillment_type<>'offer_code' AND r.reconciliation_expires_at>=?)))) ORDER BY r.reserved_at DESC"
         ).bind(account.id, event.transaction_id, occurredAt, occurredAt).all<any>();
@@ -553,12 +557,17 @@ export async function processRevenueCatEvent(
             const rollingStart = new Date(Date.parse(receivedAt) - 30 * 86400_000).toISOString();
             const statements: D1PreparedStatement[] = [
                 env.DB.prepare(
-                    "UPDATE redemptions SET status='confirmed',revenuecat_transaction_id=?,confirmed_at=? WHERE id=? AND (revenuecat_transaction_id=? OR (status IN ('reserved','presented','expired') AND ? >= reserved_at AND (fulfillment_type='offer_code' OR ? <= expires_at)))"
+                    "UPDATE redemptions SET status='confirmed',revenuecat_transaction_id=?,confirmed_at=? WHERE id=? AND " +
+                    "(revenuecat_transaction_id=? OR ((status IN ('reserved','presented','expired') OR (status='failed' AND EXISTS(" +
+                    "SELECT 1 FROM referrals WHERE id=redemptions.referral_id AND status='rejected' AND rejection_reason='apple_offer_ineligible'" +
+                    "))) AND ? >= reserved_at AND (fulfillment_type='offer_code' OR ? <= expires_at)))"
                 ).bind(event.transaction_id, occurredAt, redemption.id, event.transaction_id, occurredAt, occurredAt)
             ];
             if (redemption.referral_id && sender) {
                 statements.push(env.DB.prepare(
-                    "UPDATE referrals SET status='redeemed',redeemed_at=? WHERE id=? AND status IN ('claimed','offer_reserved','expired') AND EXISTS(SELECT 1 FROM redemptions WHERE id=? AND status='confirmed' AND revenuecat_transaction_id=?)"
+                    "UPDATE referrals SET status='redeemed',redeemed_at=?,rejection_reason=NULL WHERE id=? " +
+                    "AND (status IN ('claimed','offer_reserved','expired') OR (status='rejected' AND rejection_reason='apple_offer_ineligible')) " +
+                    "AND EXISTS(SELECT 1 FROM redemptions WHERE id=? AND status='confirmed' AND revenuecat_transaction_id=?)"
                 ).bind(occurredAt, redemption.referral_id, redemption.id, event.transaction_id));
                 if (!senderIsLifetime && adjustment?.state !== "refunded") {
                     statements.push(env.DB.prepare(
@@ -835,6 +844,14 @@ export async function route(request: Request, env: Env): Promise<Response> {
             ).bind(data.reservationID, auth.accountID).first<{status: string}>();
             if (existing?.status !== "confirmed") throw new HTTPError(409, "reservation_not_active");
         }
+        return json({});
+    }
+    if (path === "/v1/redemptions/offer-code-ineligible") {
+        if (typeof data.reservationID !== "string" ||
+            !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(data.reservationID)) {
+            throw new HTTPError(400, "invalid_reservation");
+        }
+        await rejectRecipientOfferCodeAsIneligible(env, auth.accountID, data.reservationID);
         return json({});
     }
     if (path === "/v1/redemptions/resume") {

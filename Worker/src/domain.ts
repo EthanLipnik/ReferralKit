@@ -194,6 +194,70 @@ export async function reserve(env:Env,cfg:ReferralConfig,accountID:string,kind:"
     }
     return {id:redemptionID,fulfillmentType:fulfillment,configuredProduct:product,appleOfferReference:offerRef,offerCode,creditQuantity,expiresAt:expires};
 }
+export async function rejectRecipientOfferCodeAsIneligible(
+    env: Env,
+    accountID: string,
+    redemptionID: string
+): Promise<void> {
+    const redemption = await env.DB.prepare(
+        "SELECT r.status,r.referral_id,rf.status referral_status,rf.rejection_reason " +
+        "FROM redemptions r JOIN referrals rf ON rf.id=r.referral_id " +
+        "JOIN offer_code_inventory i ON i.reservation_id=r.id " +
+        "WHERE r.id=? AND r.account_id=? AND r.fulfillment_type='offer_code' AND i.status='assigned'"
+    ).bind(redemptionID, accountID).first<{
+        status: string;
+        referral_id: string;
+        referral_status: string;
+        rejection_reason: string | null;
+    }>();
+    if (!redemption) throw new HTTPError(409, "reservation_not_rejectable");
+    if (redemption.status === "failed" &&
+        redemption.referral_status === "rejected" &&
+        redemption.rejection_reason === "apple_offer_ineligible") return;
+    if (!["reserved", "presented", "expired"].includes(redemption.status)) {
+        throw new HTTPError(409, "reservation_not_rejectable");
+    }
+
+    // The assigned inventory row proves the Apple code was disclosed. It stays assigned
+    // permanently while the customer-facing redemption and referral become terminal.
+    const results = await env.DB.batch([
+        env.DB.prepare(
+            "UPDATE redemptions SET status='failed' WHERE id=? AND account_id=? AND referral_id=? " +
+            "AND fulfillment_type='offer_code' AND status IN ('reserved','presented','expired') " +
+            "AND EXISTS(SELECT 1 FROM offer_code_inventory WHERE reservation_id=? AND status='assigned') " +
+            "AND EXISTS(SELECT 1 FROM referrals WHERE id=? AND recipient_account_id=? AND status IN ('claimed','offer_reserved','expired'))"
+        ).bind(
+            redemptionID,
+            accountID,
+            redemption.referral_id,
+            redemptionID,
+            redemption.referral_id,
+            accountID
+        ),
+        env.DB.prepare(
+            "UPDATE referrals SET status='rejected',rejection_reason='apple_offer_ineligible' " +
+            "WHERE id=? AND recipient_account_id=? AND status IN ('claimed','offer_reserved','expired') " +
+            "AND EXISTS(SELECT 1 FROM redemptions WHERE id=? AND account_id=? AND status='failed')"
+        ).bind(redemption.referral_id, accountID, redemptionID, accountID)
+    ]);
+    if (Number(results[0]?.meta?.changes || 0) === 1 &&
+        Number(results[1]?.meta?.changes || 0) === 1) return;
+
+    // A purchase webhook can win the race with this client report. Re-read instead
+    // of overwriting its authoritative confirmation.
+    const raced = await env.DB.prepare(
+        "SELECT r.status,rf.status referral_status,rf.rejection_reason " +
+        "FROM redemptions r JOIN referrals rf ON rf.id=r.referral_id WHERE r.id=? AND r.account_id=?"
+    ).bind(redemptionID, accountID).first<{
+        status: string;
+        referral_status: string;
+        rejection_reason: string | null;
+    }>();
+    if (raced?.status === "failed" &&
+        raced.referral_status === "rejected" &&
+        raced.rejection_reason === "apple_offer_ineligible") return;
+    throw new HTTPError(409, "reservation_not_rejectable");
+}
 export async function releaseExpired(env:Env):Promise<number>{
     const rows=await env.DB.prepare("SELECT r.id,r.account_id,r.referral_id,r.credit_ledger_reservation_id,COALESCE(-l.quantity,1) credit_quantity FROM redemptions r LEFT JOIN credit_ledger l ON l.id=r.credit_ledger_reservation_id WHERE r.status IN ('reserved','presented') AND r.expires_at<=?").bind(now()).all<any>();
     let released=0;

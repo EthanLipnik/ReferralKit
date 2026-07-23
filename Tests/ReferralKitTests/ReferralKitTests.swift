@@ -216,6 +216,43 @@ struct ReferralKitTests {
         #expect(await transport.reservationID == "reservation-1")
     }
 
+    @Test("Offer-code ineligibility is reported through the signed terminal endpoint")
+    func reportOfferCodeIneligible() async throws {
+        let transport = IneligibleOfferCodeTransport()
+        let client = ReferralAPIClient(
+            configuration: try testConfiguration(),
+            transport: transport,
+            signer: ReferralRequestSignerMock(),
+            challengeSynchronizer: ReferralChallengeSynchronizerMock(startsBlocked: false)
+        )
+
+        try await client.reportOfferCodeIneligible(
+            reservationID: "reservation-1",
+            identity: ReferralIdentity(customerID: "customer-ineligible", source: "test")
+        )
+
+        #expect(await transport.requestPath == "/v1/redemptions/offer-code-ineligible")
+        #expect(await transport.reservationID == "reservation-1")
+        #expect(await transport.operationID?.isEmpty == false)
+    }
+
+    @Test("Manager refreshes after reporting offer-code ineligibility")
+    func managerReportsOfferCodeIneligible() async throws {
+        let api = IneligibleReferralAPIMock()
+        let manager = ReferralManager(
+            api: api,
+            configuration: try testConfiguration(),
+            identityProvider: { ReferralIdentity(customerID: "customer-ineligible", source: "test") },
+            defaults: isolatedDefaults()
+        )
+
+        try await manager.reportOfferCodeIneligible(reservationID: "reservation-1")
+
+        #expect(api.reportedReservationID == "reservation-1")
+        #expect(api.accountRequestCount == 1)
+        #expect(manager.snapshot?.pendingActivation == nil)
+    }
+
     @Test("Lost mutation response retries the same operation with a fresh signature nonce")
     func lostMutationResponseRetriesStableOperation() async throws {
         let transport = LostResponseClaimTransport()
@@ -500,6 +537,31 @@ private actor ResumeRedemptionTransport: ReferralHTTPTransport {
     }
 }
 
+private actor IneligibleOfferCodeTransport: ReferralHTTPTransport {
+    private(set) var requestPath: String?
+    private(set) var reservationID: String?
+    private(set) var operationID: String?
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        guard let url = request.url else { throw ReferralTestError.invalidResponse }
+        requestPath = url.path
+        operationID = request.value(forHTTPHeaderField: "Idempotency-Key")
+        if let body = request.httpBody,
+           let value = try? JSONSerialization.jsonObject(with: body) as? [String: String] {
+            reservationID = value["reservationID"]
+        }
+        guard let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        ) else {
+            throw ReferralTestError.invalidResponse
+        }
+        return (Data("{}".utf8), response)
+    }
+}
+
 private actor LostResponseClaimTransport: ReferralHTTPTransport {
     struct CapturedRequest: Sendable {
         var operationID: String?
@@ -655,6 +717,49 @@ private final class ReferralAPIMock: ReferralAPIClientProtocol {
 
     func createShare(identity _: ReferralIdentity) async throws -> ReferralShare {
         ReferralShare(code: "DEMO7K4PQ9TX", url: URL(string: "https://example.com/r/DEMO7K4PQ9TX")!)
+    }
+
+    func claim(code _: String, identity _: ReferralIdentity) async throws -> ReferralFulfillment {
+        throw ReferralError.serviceUnavailable
+    }
+
+    func redeemCredit(identity _: ReferralIdentity) async throws -> ReferralFulfillment {
+        throw ReferralError.serviceUnavailable
+    }
+
+    func resumeRedemption(
+        reservationID _: String,
+        identity _: ReferralIdentity
+    ) async throws -> ReferralFulfillment {
+        throw ReferralError.serviceUnavailable
+    }
+
+    func markPresented(reservationID _: String, identity _: ReferralIdentity) async throws {}
+}
+
+@MainActor
+private final class IneligibleReferralAPIMock: ReferralAPIClientProtocol {
+    private(set) var reportedReservationID: String?
+    private(set) var accountRequestCount = 0
+
+    func account(identity _: ReferralIdentity) async throws -> ReferralAccountSnapshot {
+        accountRequestCount += 1
+        return ReferralAccountSnapshot(
+            availableCredits: 0,
+            reservedCredits: 0,
+            pendingRewards: 0,
+            canEarnCredits: true,
+            isLifetime: false,
+            share: nil
+        )
+    }
+
+    func reportOfferCodeIneligible(reservationID: String, identity _: ReferralIdentity) async throws {
+        reportedReservationID = reservationID
+    }
+
+    func createShare(identity _: ReferralIdentity) async throws -> ReferralShare {
+        throw ReferralError.serviceUnavailable
     }
 
     func claim(code _: String, identity _: ReferralIdentity) async throws -> ReferralFulfillment {

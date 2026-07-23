@@ -126,6 +126,14 @@ await present(fulfillment)
 
 After the purchase sheet completes, refresh your subscription state and call `refresh()` to update the referral balance.
 
+Before calling `claim(code:)`, synchronize the customer’s App Store purchase history and check the Apple Account’s subscription-group eligibility. RevenueCat and Apple can otherwise disagree about inactive history. If Apple still rejects a disclosed recipient offer as ineligible, close its recovery path without recycling the code:
+
+```swift
+try await referralManager.reportOfferCodeIneligible(
+    reservationID: fulfillment.reservationID
+)
+```
+
 ## Universal links
 
 Referral links use this shape:

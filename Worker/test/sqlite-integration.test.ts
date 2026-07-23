@@ -3,8 +3,8 @@ import {readFileSync} from "node:fs";
 import {join} from "node:path";
 import {DatabaseSync, type SQLInputValue} from "node:sqlite";
 import test from "node:test";
-import {createCode, claim, pendingReservationForAccount, releaseExpired} from "../src/domain";
-import {encryptOfferCode, hmac} from "../src/crypto";
+import {createCode, claim, pendingReservationForAccount, rejectRecipientOfferCodeAsIneligible, releaseExpired} from "../src/domain";
+import {encryptOfferCode, hmac, sha256} from "../src/crypto";
 import {Env, ReferralConfig} from "../src/env";
 import {enforceRegistrationChallengeRateLimit, processRevenueCatEvent, revokeDevice, route} from "../src/index";
 import {importOfferCodes, releaseOfferCode, reserveOfferCode} from "../src/inventory";
@@ -320,6 +320,91 @@ test("a disclosed Apple code is never returned to inventory", async () => {
     assert.equal(database.raw.prepare("SELECT status FROM offer_code_inventory WHERE id='inventory'").get()!.status, "assigned");
 });
 
+test("an authenticated ineligibility report terminally rejects only its assigned recipient redemption", async () => {
+    const database = new SQLiteD1(), env = environment(database);
+    addAccount(database, "sender", "sender-rc");
+    addAccount(database, "recipient", "recipient-rc");
+    await addCode(database, env, "code", "sender", "DEMO-2345-6789-ABCD");
+    database.raw.prepare(
+        "INSERT INTO referrals(id,sender_account_id,recipient_account_id,referral_code_id,status,claimed_at,claim_expires_at) VALUES(?,?,?,?,?,?,?)"
+    ).run("referral", "sender", "recipient", "code", "offer_reserved", "2026-07-14T10:00:00.000Z", "2026-07-15T10:00:00.000Z");
+    database.raw.prepare(
+        "INSERT INTO redemptions(id,account_id,referral_id,fulfillment_type,configured_product,apple_offer_reference,status,reserved_at,expires_at,reconciliation_expires_at,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
+    ).run("redemption", "recipient", "referral", "offer_code", "monthly", env.RECIPIENT_MONTHLY_OFFER_ID, "presented", "2026-07-14T10:00:00.000Z", "2030-07-14T10:30:00.000Z", "2030-08-13T10:30:00.000Z", "operation-1");
+    await addInventory(database, env, "inventory", env.RECIPIENT_MONTHLY_OFFER_ID, "monthly", "redemption");
+
+    const keys = await crypto.subtle.generateKey(
+        {name: "ECDSA", namedCurve: "P-256"},
+        true,
+        ["sign", "verify"]
+    );
+    const publicKey = await crypto.subtle.exportKey("raw", keys.publicKey);
+    database.raw.prepare(
+        "INSERT INTO registered_devices(id,account_id,public_key_jwk,key_version,created_at,last_seen_at) VALUES(?,?,?,?,?,?)"
+    ).run(
+        "device",
+        "recipient",
+        Buffer.from(publicKey).toString("base64"),
+        1,
+        "2026-07-14T10:00:00.000Z",
+        "2026-07-14T10:00:00.000Z"
+    );
+
+    for (const nonce of ["ineligible_report_1", "ineligible_report_2"]) {
+        const response = await route(await signedMutationRequest(
+            keys.privateKey,
+            "/v1/redemptions/offer-code-ineligible",
+            {reservationID: "redemption"},
+            nonce,
+            "recipient-rc"
+        ), env);
+        assert.equal(response.status, 200);
+    }
+
+    const referral = database.raw.prepare(
+        "SELECT status,rejection_reason FROM referrals WHERE id='referral'"
+    ).get()!;
+    assert.equal(referral.status, "rejected");
+    assert.equal(referral.rejection_reason, "apple_offer_ineligible");
+    assert.equal(database.raw.prepare("SELECT status FROM redemptions WHERE id='redemption'").get()!.status, "failed");
+    assert.equal(database.raw.prepare("SELECT status FROM offer_code_inventory WHERE id='inventory'").get()!.status, "assigned");
+    assert.equal(await pendingReservationForAccount(env, "recipient", "recipient"), null);
+
+    await assert.rejects(
+        rejectRecipientOfferCodeAsIneligible(env, "sender", "redemption"),
+        (error: unknown) => error instanceof Error && "code" in error && error.code === "reservation_not_rejectable"
+    );
+    await releaseOfferCode(env, "redemption");
+    assert.equal(database.raw.prepare("SELECT status FROM offer_code_inventory WHERE id='inventory'").get()!.status, "assigned");
+});
+
+test("an authoritative purchase webhook supersedes a false client ineligibility report", async () => {
+    const database = new SQLiteD1(), env = environment(database);
+    addAccount(database, "sender", "sender-rc");
+    addAccount(database, "recipient", "recipient-rc");
+    await addCode(database, env, "code", "sender", "DEMO-2345-6789-ABCD");
+    database.raw.prepare(
+        "INSERT INTO referrals(id,sender_account_id,recipient_account_id,referral_code_id,status,claimed_at,claim_expires_at) VALUES(?,?,?,?,?,?,?)"
+    ).run("referral", "sender", "recipient", "code", "offer_reserved", "2026-07-14T10:00:00.000Z", "2026-07-15T10:00:00.000Z");
+    database.raw.prepare(
+        "INSERT INTO redemptions(id,account_id,referral_id,fulfillment_type,configured_product,apple_offer_reference,status,reserved_at,expires_at,reconciliation_expires_at,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
+    ).run("redemption", "recipient", "referral", "offer_code", "monthly", env.RECIPIENT_MONTHLY_OFFER_ID, "presented", "2026-07-14T10:00:00.000Z", "2026-07-14T10:30:00.000Z", "2026-08-13T10:30:00.000Z", "operation-1");
+    await addInventory(database, env, "inventory", env.RECIPIENT_MONTHLY_OFFER_ID, "monthly", "redemption");
+    await rejectRecipientOfferCodeAsIneligible(env, "recipient", "redemption");
+
+    await withActiveSender(() => processRevenueCatEvent(
+        env,
+        purchaseEvent(),
+        "2026-07-14T10:20:00.000Z"
+    ));
+
+    assert.equal(database.raw.prepare("SELECT status FROM redemptions WHERE id='redemption'").get()!.status, "confirmed");
+    assert.equal(database.raw.prepare("SELECT status FROM referrals WHERE id='referral'").get()!.status, "redeemed");
+    assert.equal(database.raw.prepare("SELECT rejection_reason FROM referrals WHERE id='referral'").get()!.rejection_reason, null);
+    assert.equal(database.raw.prepare("SELECT status FROM offer_code_inventory WHERE id='inventory'").get()!.status, "redeemed");
+    assert.equal(database.raw.prepare("SELECT COALESCE(SUM(quantity),0) balance FROM credit_ledger WHERE account_id='sender'").get()!.balance, 1);
+});
+
 test("offer-code imports reject a product that does not own the reference", async () => {
     const database = new SQLiteD1(), env = environment(database);
     await assert.rejects(
@@ -471,3 +556,31 @@ test("refund arriving before purchase confirmation suppresses sender credit", as
     assert.equal(database.raw.prepare("SELECT status FROM redemptions WHERE id='redemption'").get()!.status, "confirmed");
     assert.equal(database.raw.prepare("SELECT COALESCE(SUM(quantity),0) balance FROM credit_ledger WHERE account_id='sender'").get()!.balance, 0);
 });
+
+async function signedMutationRequest(
+    privateKey: CryptoKey,
+    path: string,
+    value: Record<string, string>,
+    nonce: string,
+    identity: string
+): Promise<Request> {
+    const body = JSON.stringify(value);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const canonical = ["POST", path, await sha256(body), timestamp, nonce].join("\n");
+    const signature = await crypto.subtle.sign(
+        {name: "ECDSA", hash: "SHA-256"},
+        privateKey,
+        new TextEncoder().encode(canonical)
+    );
+    return new Request(`https://staging.example.com${path}`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "X-Demo-Identity": identity,
+            "X-Demo-Timestamp": timestamp,
+            "X-Demo-Nonce": nonce,
+            "X-Demo-Signature": Buffer.from(signature).toString("base64")
+        },
+        body
+    });
+}

@@ -14,6 +14,15 @@ public protocol ReferralAPIClientProtocol: Sendable {
     func redeemCredit(identity: ReferralIdentity) async throws -> ReferralFulfillment
     func resumeRedemption(reservationID: String, identity: ReferralIdentity) async throws -> ReferralFulfillment
     func markPresented(reservationID: String, identity: ReferralIdentity) async throws
+    func reportOfferCodeIneligible(reservationID: String, identity: ReferralIdentity) async throws
+}
+
+public extension ReferralAPIClientProtocol {
+    // A default keeps existing test and integration clients source-compatible while
+    // older implementations adopt the new server-backed transition independently.
+    func reportOfferCodeIneligible(reservationID _: String, identity _: ReferralIdentity) async throws {
+        throw ReferralError.serviceUnavailable
+    }
 }
 
 public protocol ReferralHTTPTransport: Sendable {
@@ -202,6 +211,19 @@ public struct ReferralAPIClient: ReferralAPIClientProtocol, Sendable {
             method: "POST",
             body: PresentedRequest(reservationID: reservationID),
             identity: identity
+        )
+    }
+
+    public func reportOfferCodeIneligible(reservationID: String, identity: ReferralIdentity) async throws {
+        let operationID = UUID().uuidString.lowercased()
+        let _: Empty = try await send(
+            path: "/v1/redemptions/offer-code-ineligible",
+            method: "POST",
+            body: PresentedRequest(reservationID: reservationID),
+            identity: identity,
+            // The server transition is naturally idempotent; the operation key also
+            // lets the transport safely retry a response lost after the mutation.
+            idempotencyKey: operationID
         )
     }
 
